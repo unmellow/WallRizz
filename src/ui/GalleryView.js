@@ -10,7 +10,6 @@ import {
   exitAlternativeScreen,
 } from "../../helpers/cursor.js";
 import {
-  handleKeysPress,
   handleKeysPressAsync,
   keySequences,
 } from "../../helpers/terminal.js";
@@ -34,7 +33,7 @@ import {
   regrid,
 } from "./imageProtocol.js";
 import { encodeJpegPayload, itermEscape, TileCache } from "./tileCache.js";
-import { getProcessLimit } from "../core/utils/async.js";
+import { defaultPoolSize, magickSlots, ThumbPool } from "../wallpaper/thumbnails.js";
 
 // SIGWINCH (28 on Linux, macOS and the BSDs); QuickJS doesn't export it
 const SIGWINCH = 28;
@@ -54,13 +53,14 @@ const RESIZE_POLL_MS = 400;
 const KITTY_DELETE_ALL = "\x1b_Ga=d,d=A,q=2\x1b\\";
 
 export class GalleryView {
-  constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath, onFocus) {
+  constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath, onFocus, onReady) {
     this.config = config;
     this.wallpapers = wallpapers;
     this.wallpapersDir = wallpapersDir;
     this.handleSelection = handleSelection;
     this.getWallpaperPath = getWallpaperPath;
     this.onFocusCallback = onFocus;
+    this.onReady = onReady;
     // "kitty" inside kitty itself keeps the original native kitty graphics
     // path; everything else (iterm, sixel, symbols, ueberzug, and kitty
     // graphics in other terminals such as WezTerm, which put the images
@@ -70,6 +70,7 @@ export class GalleryView {
     this.isKitty = this.protocol === "kitty" && insideKitty();
     this.statusLine = null;
     this.ueberzugRestarts = 0;
+    this.thumbs = null;
   }
 
   async render() {
@@ -80,22 +81,29 @@ export class GalleryView {
 
     const [terminalWidth, terminalHeight] = OS.ttyGetWinSize();
 
-    this.processLimit = this.config.processLimit ??
-      Math.max(1, await getProcessLimit());
+    // -x / --plimit: thumbnail worker threads, parallel tile encoders, and
+    // the cap on magick processes running at once. Default min(4, CPUs).
+    this.poolSize = this.config.processLimit ?? defaultPoolSize();
+    magickSlots.setCap(this.poolSize);
+    this.thumbs = new ThumbPool({
+      size: this.config.thumbnailSize,
+      poolSize: this.poolSize,
+    });
 
     if (this.protocol === "ueberzug") {
       this.ueberzugOutput = getImageProtocol(this.config).ueberzugOutput ?? "x11";
-      if (await this.startUeberzug()) {
-        installUeberzugSignalHandlers(() => {
-          STD.out.puts(exitAlternativeScreen + clearTerminal + cursorShow);
-          STD.out.flush();
-        });
-      } else {
+      if (!(await this.startUeberzug())) {
         // ueberzugpp didn't start (no usable canvas, missing libs...)
         requireChafa("symbols", "ueberzugpp failed to start");
         this.protocol = "symbols";
       }
     }
+    // Ctrl+C / SIGTERM / SIGHUP: no overlay, magick child or temp file is
+    // left behind, and the screen is restored
+    installUeberzugSignalHandlers(() => {
+      STD.out.puts(exitAlternativeScreen + clearTerminal + cursorShow);
+      STD.out.flush();
+    });
 
     if (!this.isKitty) {
       // cell pixel size: needed to fit images into tiles (and for sixel
@@ -144,7 +152,7 @@ export class GalleryView {
     this.tiles = new TileCache({
       protocol: this.protocol,
       cellPx: this.protocol === "sixel" ? this.cellPxText : null,
-      limit: this.processLimit,
+      limit: this.poolSize,
     });
   }
 
@@ -202,9 +210,9 @@ export class GalleryView {
   }
 
   async getImageDimensions(filePath) {
-    const output = await execAsync([
-      "magick", "identify", "-format", "%w %h", filePath,
-    ]);
+    const output = await magickSlots.run(() =>
+      execAsync(["magick", "identify", "-format", "%w %h", `${filePath}[0]`])
+    );
     const [width, height] = output.split(" ").map(Number);
     return { width, height };
   }
@@ -229,13 +237,15 @@ export class GalleryView {
 
     if (err) {
       print("Loading...");
-      await execAsync([
-        "magick",
-        pngSource.filePath,
-        "-type",
-        "truecolor",
-        tempFile,
-      ]);
+      await magickSlots.run(() =>
+        execAsync([
+          "magick",
+          pngSource.filePath,
+          "-type",
+          "truecolor",
+          tempFile,
+        ])
+      );
     }
 
     const encodedPath = this.toBase64(tempFile);
@@ -274,16 +284,17 @@ export class GalleryView {
         (this._fullH && sourceRect.h < this._fullH))
     ) {
       const cropFile = `${HOME_DIR}/.cache/WallRizz/fullscreen-crop.png`;
-      await execAsync([
+      const src = filePath;
+      await magickSlots.run(() => execAsync([
         "magick",
-        filePath,
+        src,
         "-crop",
         `${Math.round(sourceRect.w)}x${Math.round(sourceRect.h)}+${
           Math.round(sourceRect.x ?? 0)
         }+${Math.round(sourceRect.y ?? 0)}`,
         "+repage",
         cropFile,
-      ]);
+      ]));
       filePath = cropFile;
     }
 
@@ -329,20 +340,22 @@ export class GalleryView {
     if (this.protocol === "kitty") {
       // kitty graphics outside kitty: a PNG file the terminal reads (t=f)
       const png = `${HOME_DIR}/.cache/WallRizz/fullscreen-kitty.png`;
-      await execAsync([
+      await magickSlots.run(() => execAsync([
         "magick",
         `${filePath}[0]`,
         "-resize",
         "2560x2560>",
         png,
-      ]);
+      ]));
       output = KITTY_DELETE_ALL + kittyFileEscape(png, columns, rows);
     } else if (this.protocol === "iterm") {
       // compressed JPEG instead of chafa's uncompressed TIFF
-      const { b64, size: bytes } = await encodeJpegPayload(
-        filePath,
-        `${HOME_DIR}/.cache/WallRizz/fullscreen.jpg`,
-        2560,
+      const { b64, size: bytes } = await magickSlots.run(() =>
+        encodeJpegPayload(
+          filePath,
+          `${HOME_DIR}/.cache/WallRizz/fullscreen.jpg`,
+          2560,
+        )
       );
       output = itermEscape(b64, bytes, columns, rows);
     } else {
@@ -474,7 +487,7 @@ export class GalleryView {
       if (cellIndex < 0 || cellIndex >= coordinates.length) return;
       let out = "";
       if (highlightedCell !== null && highlightedCell !== cellIndex) {
-        out += frameOf(highlightedCell, [" ", " ", " ", " ", " ", " "]);
+        out += restFrameOf(highlightedCell);
       }
       out += frameOf(cellIndex, frameChars());
       highlightedCell = cellIndex;
@@ -503,6 +516,12 @@ export class GalleryView {
       if (drawW <= 0 || drawH <= 0) return;
 
       STD.out.puts(cursorTo(0, 0), eraseDown);
+      // placeholder frames of the tiles still waiting for a thumbnail
+      let frames = "";
+      for (let i = 0; i < tilesOnPage(); i++) {
+        if (i !== cellIndex && !loaded.has(i)) frames += placeholderOf(i);
+      }
+      STD.out.puts(frames);
 
       if (currentHighlight !== "fill") {
         const borderedLines = this.border(
@@ -551,11 +570,62 @@ export class GalleryView {
       return { x: box.x + fit.dx, y: box.y + fit.dy, columns: fit.columns, rows: fit.rows };
     };
 
-    // Non-kitty pages: frame first, then tiles drawn progressively as they
-    // come out of the (cached, bounded, parallel) encoder. Returns without
-    // waiting so keys stay responsive; stale tiles of a previous page are
-    // never drawn (generation check) and their pending encodes are dropped.
+    // Thumbnails are made by the worker pool (see wallpaper/thumbnails.js):
+    // every page draw first shows the frame of each tile whose image isn't
+    // ready, then fills tiles in as their thumbnail (and tile encode)
+    // finishes. Nothing here waits for a thumbnail, so keys stay
+    // responsive. Each draw takes a ticket (pageGeneration for drawing,
+    // thumbGen for the pool): output of an older draw is never written.
     let pageGeneration = 0;
+    // tiles of the current page whose image is drawn (the others show a
+    // dim placeholder frame)
+    let loaded = new Set();
+    const tilesOnPage = () =>
+      Math.max(0, Math.min(maxCellsInGrid, pngs.length - currentPage * maxCellsInGrid));
+    const PLACEHOLDER = ["─", "│", "┌", "┐", "└", "┘"];
+    const BLANK = [" ", " ", " ", " ", " ", " "];
+    const placeholderOf = (i) => "\x1b[0;2m" + frameOf(i, PLACEHOLDER) + "\x1b[0m";
+    // frame of a tile that isn't selected
+    const restFrameOf = (i) =>
+      i < tilesOnPage() && !loaded.has(i) && this.protocol !== "none"
+        ? placeholderOf(i)
+        : frameOf(i, BLANK);
+    const sourceOf = (idx) => getHiRes(pngs[idx]) ?? pngs[idx].filePath;
+    const thumbReady = (idx) => OS.stat(pngs[idx].filePath)[1] === 0;
+    // thumbnail of a tile: at once if cached, else from the pool
+    const thumbFor = (idx, thumbGen, low = false) =>
+      thumbReady(idx)
+        ? Promise.resolve(pngs[idx].filePath)
+        : this.thumbs.request(sourceOf(idx), thumbGen, { low });
+    // a tile's image is on screen: its placeholder goes
+    const markLoaded = (i) => {
+      loaded.add(i);
+      if (i !== highlightedCell) STD.out.puts(frameOf(i, BLANK));
+      redrawHighlightFrame();
+    };
+
+    // Prefetch (after the visible page is complete): thumbnails of the next
+    // page, then of the previous one, at low priority, and their encoded
+    // tiles (not drawn). A page flip then draws from cache.
+    const prefetch = (generation, thumbGen) => {
+      const pageOf = async (page) => {
+        if (page < 0 || page >= totalPages || generation !== pageGeneration) return;
+        const start = page * maxCellsInGrid;
+        const jobs = [];
+        for (let i = 0; i < maxCellsInGrid && start + i < pngs.length; i++) {
+          jobs.push(
+            thumbFor(start + i, thumbGen, true).then((thumb) => {
+              if (!thumb || generation !== pageGeneration || !this.tiles) return;
+              const box = fitTile(i, thumb);
+              return this.tiles.get(thumb, box.columns, box.rows, { low: true });
+            }).catch(() => {}),
+          );
+        }
+        await Promise.all(jobs);
+      };
+      return pageOf(currentPage + 1).then(() => pageOf(currentPage - 1));
+    };
+
     // Überzug++: the overlays are separate windows, so every overlay of the
     // old page is removed (and adds of it still queued are dropped) before
     // the new page's tiles are added. Identifiers are unique per draw (page
@@ -568,39 +638,60 @@ export class GalleryView {
       STD.out.puts(clearTerminal + statusRow());
       highlightedCell = null;
       const generation = ++pageGeneration;
-      renderHighlight(currentCell);
+      const thumbGen = this.thumbs.bump();
+      loaded = new Set();
       const page = currentPage;
       const startIdx = page * maxCellsInGrid;
-      const overlays = [];
+      const current = () =>
+        generation === pageGeneration && !this.fullscreen && this.ueberzug === ueberzug;
+      const addOverlay = (i, thumb) => {
+        const box = fitTile(i, thumb);
+        // ueberzug cells are 0-based, cursorTo rows are 1-based
+        ueberzug.add(
+          `wallrizz-p${page}-g${generation}-${i}`,
+          box.x,
+          box.y - 1,
+          box.columns,
+          box.rows,
+          thumb,
+          "fit_contain",
+        );
+        markLoaded(i);
+      };
+      const ready = [];
+      const pending = [];
+      let frames = "";
       for (let i = 0; i < maxCellsInGrid && startIdx + i < pngs.length; i++) {
-        const thumb = pngs[startIdx + i].filePath;
-        overlays.push({ i, thumb, box: fitTile(i, thumb) });
-      }
-      OS.setTimeout(() => {
-        if (
-          generation !== pageGeneration || this.fullscreen ||
-          this.ueberzug !== ueberzug
-        ) return;
-        for (const { i, thumb, box } of overlays) {
-          // ueberzug cells are 0-based, cursorTo rows are 1-based
-          ueberzug.add(
-            `wallrizz-p${page}-g${generation}-${i}`,
-            box.x,
-            box.y - 1,
-            box.columns,
-            box.rows,
-            thumb,
-            "fit_contain",
-          );
+        if (thumbReady(startIdx + i)) {
+          ready.push({ i, thumb: pngs[startIdx + i].filePath });
+          continue;
         }
+        if (i !== currentCell) frames += placeholderOf(i);
+        pending.push(
+          this.thumbs.request(sourceOf(startIdx + i), thumbGen).then((thumb) => {
+            if (thumb && current()) addOverlay(i, thumb);
+          }).catch(() => {}),
+        );
+      }
+      STD.out.puts(frames);
+      renderHighlight(currentCell);
+      OS.setTimeout(() => {
+        if (!current()) return;
+        for (const { i, thumb } of ready) addOverlay(i, thumb);
         redrawHighlightFrame();
       }, UEBERZUG_SETTLE_MS);
+      Promise.all(pending).then(() => {
+        if (current()) prefetch(generation, thumbGen);
+      });
       const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
       if (!skipFocus && pngs[globalIndex]) {
         onFocus(pngs[globalIndex], globalIndex);
       }
     };
 
+    // Cell-grid pages (iterm, sixel, symbols, kitty graphics outside kitty):
+    // tiles already encoded are drawn at once; the others show a placeholder
+    // frame and are drawn as their thumbnail and tile encode finish.
     const renderPageTiles = (skipFocus = false) => {
       if (this.ueberzug) return renderPageOverlays(skipFocus);
       relayout();
@@ -609,49 +700,58 @@ export class GalleryView {
       highlightedCell = null;
       const generation = ++pageGeneration;
       this.tiles?.cancelPending();
-      renderHighlight(currentCell);
+      // the thumbnail ticket: work of an older page is dropped / never drawn
+      const thumbGen = this.thumbs.bump();
+      loaded = new Set();
+      const imagesOn = kittyCells || !!this.tiles;
+      const current = () => generation === pageGeneration && !this.fullscreen;
 
-      const draw = (box, out) => {
-        if (out === null || generation !== pageGeneration || this.fullscreen) return;
+      const draw = (i, box, out) => {
+        if (out === null || !current()) return;
         writeOut(positionOutput(this.protocol, out, box.x, box.y));
-        // images never overlap the frame, but repaint it anyway
-        redrawHighlightFrame();
+        markLoaded(i);
+      };
+      // encoded output of a tile from its thumbnail: a string (cached), or
+      // a promise of one
+      const encodeTile = (i, thumb, cachedOnly) => {
+        const box = fitTile(i, thumb);
+        if (kittyCells) return { box, out: kittyFileEscape(thumb, box.columns, box.rows) };
+        const out = this.tiles.peek(thumb, box.columns, box.rows);
+        if (out !== null || cachedOnly) return { box, out };
+        return { box, out: this.tiles.get(thumb, box.columns, box.rows) };
       };
 
       const startIdx = currentPage * maxCellsInGrid;
-      const pending = [];
-      for (let i = 0; i < maxCellsInGrid && startIdx + i < pngs.length; i++) {
-        if (!this.tiles && !kittyCells) break; // no image protocol left
-        const thumb = pngs[startIdx + i].filePath;
-        const box = fitTile(i, thumb);
-        if (kittyCells) {
-          // the terminal reads and scales the PNG thumbnail itself
-          draw(box, kittyFileEscape(thumb, box.columns, box.rows));
-          continue;
+      const now = [];
+      const later = [];
+      let frames = "";
+      for (let i = 0; imagesOn && i < maxCellsInGrid && startIdx + i < pngs.length; i++) {
+        const idx = startIdx + i;
+        if (thumbReady(idx)) {
+          const tile = encodeTile(i, pngs[idx].filePath, true);
+          if (tile.out !== null) {
+            now.push({ i, ...tile });
+            continue;
+          }
         }
-        const cached = this.tiles.peek(thumb, box.columns, box.rows);
-        if (cached !== null) {
-          draw(box, cached);
-          continue;
-        }
-        pending.push(
-          this.tiles.get(thumb, box.columns, box.rows)
-            .then((out) => draw(box, out))
-            .catch(() => {}),
-        );
+        if (i !== currentCell) frames += placeholderOf(i);
+        later.push(i);
       }
+      STD.out.puts(frames);
+      renderHighlight(currentCell);
+      for (const { i, box, out } of now) draw(i, box, out);
 
-      // prefetch the next page in the background (encode only, no drawing)
+      const pending = later.map((i) =>
+        thumbFor(startIdx + i, thumbGen).then((thumb) => {
+          if (!thumb || !current()) return;
+          const { box, out } = encodeTile(i, thumb, false);
+          return Promise.resolve(out).then((o) => draw(i, box, o));
+        }).catch(() => {})
+      );
+      // prefetch, only once the visible page is complete (never ahead of it)
       Promise.all(pending).then(() => {
-        if (generation !== pageGeneration || !this.tiles) return;
-        const nextStart = (currentPage + 1) * maxCellsInGrid;
-        for (let i = 0; i < maxCellsInGrid && nextStart + i < pngs.length; i++) {
-          const thumb = pngs[nextStart + i].filePath;
-          const box = fitTile(i, thumb);
-          this.tiles.get(thumb, box.columns, box.rows, { low: true })
-            .catch(() => {});
-        }
-      });
+        if (current()) return prefetch(generation, thumbGen);
+      }).catch(() => {});
 
       const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
       if (!skipFocus && pngs[globalIndex]) {
@@ -659,34 +759,52 @@ export class GalleryView {
       }
     };
 
+    // kitty itself: the original native path (images in kitty's own layer,
+    // placed with t=f from the PNG thumbnail), filled in the same way.
     const renderPage = async (skipFocus = false) => {
       if (!this.isKitty) return renderPageTiles(skipFocus);
       STD.out.puts(clearTerminal);
       highlightedCell = null;
+      const generation = ++pageGeneration;
+      const thumbGen = this.thumbs.bump();
+      loaded = new Set();
+      const current = () => generation === pageGeneration && !this.fullscreen;
 
       const startIdx = currentPage * maxCellsInGrid;
-      const promises = [];
-
-      for (let i = 0; i < maxCellsInGrid; i++) {
-        const pngIndex = startIdx + i;
+      const place = (i, thumb) => {
         const coord = coordinates[i];
-
-        if (pngIndex < pngs.length) {
-          promises.push(
-            this.renderImage(pngs[pngIndex], {
-              rows: cellHeight - cellPadding.horizontal * 2,
-              columns: cellWidth - cellPadding.vertical * 2,
-            }, {
-              row: coord[0] + cellPadding.vertical,
-              column: coord[1] + cellPadding.horizontal,
-            }),
-          );
-        }
+        return this.renderImage({ filePath: thumb }, {
+          rows: cellHeight - cellPadding.horizontal * 2,
+          columns: cellWidth - cellPadding.vertical * 2,
+        }, {
+          row: coord[0] + cellPadding.vertical,
+          column: coord[1] + cellPadding.horizontal,
+        });
+      };
+      const ready = [];
+      const later = [];
+      for (let i = 0; i < maxCellsInGrid && startIdx + i < pngs.length; i++) {
+        if (thumbReady(startIdx + i)) {
+          ready.push(i);
+          loaded.add(i);
+        } else later.push(i);
       }
-
-      await Promise.all(promises);
-
+      // the highlight (and the placeholder frames of the missing tiles)
       renderHighlight(currentCell);
+      await Promise.all(ready.map((i) => place(i, pngs[startIdx + i].filePath)));
+
+      const pending = later.map((i) =>
+        this.thumbs.request(sourceOf(startIdx + i), thumbGen).then(async (thumb) => {
+          if (!thumb || !current()) return;
+          loaded.add(i);
+          await place(i, thumb);
+          if (i !== currentCell) STD.out.puts(frameOf(i, BLANK));
+          STD.out.flush();
+        }).catch(() => {})
+      );
+      Promise.all(pending).then(() => {
+        if (current()) return prefetch(generation, thumbGen);
+      }).catch(() => {});
 
       const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
       if (!skipFocus && pngs[globalIndex]) {
@@ -748,6 +866,10 @@ export class GalleryView {
     STD.out.puts(cursorHide);
     try {
       await renderPage();
+      // colours/themes for the wallpapers not generated up front, quietly,
+      // and only while no thumbnail is being made
+      this.stopBackground = this.onReady?.(() =>
+        this.thumbs.pending === 0 && this.thumbs.busy.size === 0 && !isFullScreen);
 
     const moveSelectionDown = () => {
       if (isFullScreen) return;
@@ -820,7 +942,11 @@ export class GalleryView {
         // no overlay may outlive the view it belongs to (and pending adds
         // of the grid page are dropped)
         this.ueberzug?.removeAll();
-        if (!this.isKitty) pageGeneration++;
+        pageGeneration++;
+        // queued thumbnails / tile encodes of the grid page are dropped, so
+        // fullscreen's own magick gets a slot as soon as one frees up
+        this.thumbs.bump();
+        this.tiles?.cancelPending();
         this.fullscreen = !isFullScreen;
         if (isFullScreen = !isFullScreen) {
           print(enterAlternativeScreen);
@@ -943,10 +1069,10 @@ export class GalleryView {
       exit();
     };
 
-    // kitty keeps the original blocking key reader; the other protocols need
-    // the event loop to keep running between keys (progressive tiles,
-    // background prefetch).
-    await (this.isKitty ? handleKeysPress : handleKeysPressAsync)({
+    // Keys are read from the event loop (never a blocking read), so worker
+    // results, tile encodes and prefetch keep running between keys, and a
+    // key is handled while a cold page is still being generated.
+    await handleKeysPressAsync({
       [keySequences.ArrowDown]: () => {
         if (isFullScreen && zoomLevel > 1) return panDown();
         moveSelectionDown();
@@ -1007,6 +1133,8 @@ export class GalleryView {
       },
 
       "q": handleExit,
+      // raw mode: Ctrl+C arrives as a key, not as SIGINT
+      [keySequences["Ctrl+C"]]: handleExit,
     });
 
     } finally {
@@ -1019,6 +1147,10 @@ export class GalleryView {
         this.ueberzug.stop();
         this.ueberzug = null;
       }
+      // drop queued thumbnail work, kill a magick still mid-batch (its temp
+      // file is removed) and let the worker threads end
+      this.stopBackground?.();
+      await this.thumbs?.shutdown();
       STD.out.puts(clearTerminal);
       print(cursorShow);
     }

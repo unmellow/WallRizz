@@ -4,8 +4,9 @@
  * Wallpapers found in sub directories are returned with their path relative
  * to the wallpaper directory as `name` (e.g. "favorites/landscape/a.jpg"), so
  * every existing `wallpapersDirectory + name` path keeps working. Cache keys
- * (`uniqueId`) are derived from device + inode, so equal file names in
- * different folders never collide.
+ * (`uniqueId`, see WallpaperManager / thumbnails.js) are derived from the
+ * full path + mtime + size, so equal file names in different folders never
+ * collide and an edited file gets a new thumbnail.
  */
 
 const IMAGE_RE = /\.(jpeg|png|webp|jpg|gif)$/i;

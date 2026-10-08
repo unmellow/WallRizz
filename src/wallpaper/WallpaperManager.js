@@ -5,6 +5,7 @@ import { notify, log } from "../core/utils/ui.js";
 import { ensureDir } from "../core/utils/io.js";
 import { CacheManager } from "./CacheManager.js";
 import { scanWallpapers } from "./scan.js";
+import { defaultPoolSize, magickSlots, thumbName } from "./thumbnails.js";
 import { OS, STD, HOME_DIR, EXIT, SystemError } from "../core/constants.js";
 
 export default class WallpaperManager {
@@ -20,11 +21,31 @@ export default class WallpaperManager {
   }
 
   async init() {
+    // -x caps the ImageMagick processes running at once, in every mode
+    magickSlots.setCap(this.config.processLimit ?? defaultPoolSize());
     this.loadWallpaperDaemonHandlerScript();
+    // Grid mode shows the grid immediately: thumbnails are made by the
+    // gallery's worker pool (frames first, images as they finish) and
+    // colours/themes are generated for a wallpaper when it is selected,
+    // with the rest filled in afterwards at low priority. List mode and
+    // the headless setters still need every thumbnail and theme up front.
+    if (this.showsGrid()) {
+      this.themeManager.loadThemeExtensionScripts();
+      await this.handleSettingWallpaper((idle) =>
+        this.themeManager.fillRemaining(this.wallpapers, idle)
+      );
+      return;
+    }
     await this.cacheManager.handleWallpaperCacheCreation();
     await this.themeManager.init();
     await this.handleSettingRandomWallpaper();
     await this.handleSettingWallpaper();
+  }
+
+  /** The interactive grid (not the fzf list, not a headless setter). */
+  showsGrid() {
+    return this.config.previewMode !== "list" &&
+      !this.config.setInterval && !this.config.setRandomWallpaper;
   }
 
   loadWallpapers() {
@@ -38,10 +59,20 @@ export default class WallpaperManager {
     } catch (e) {
       throw new Error(e.message);
     }
-    const wallpapers = found.map(({ name, dev, ino }) => ({
-      name,
-      uniqueId: `${dev}${ino}`.concat(".png"),
-    }));
+    // The id is the thumbnail's file name: path + mtime + size (+ thumbnail
+    // size), so an edited wallpaper gets a new thumbnail, palette and theme
+    // (the old dev+inode name kept stale ones forever). Old cache files are
+    // left alone; they simply aren't used any more.
+    const wallpapers = found.map(({ name, dev, ino }) => {
+      const path = this.config.wallpapersDirectory.concat(name);
+      const [st, err] = OS.stat(path);
+      return {
+        name,
+        uniqueId: err === 0
+          ? thumbName(path, st, this.config.thumbnailSize)
+          : `${dev}${ino}`.concat(".png"),
+      };
+    });
     log(
       `Found ${wallpapers.length} wallpaper(s) in ${this.config.wallpapersDirectory}` +
         (this.config.recursive || this.config.depth !== undefined
@@ -112,7 +143,7 @@ export default class WallpaperManager {
     }
   }
 
-  async handleSettingWallpaper() {
+  async handleSettingWallpaper(onGalleryReady) {
     const ui = new UserInterface(
       this.wallpapers,
       this.cacheManager.getCacheDir(),
@@ -120,12 +151,17 @@ export default class WallpaperManager {
       this.getWallpaperPath.bind(this),
       this.handleSelection.bind(this),
       this.config,
+      onGalleryReady,
     );
     await ui.init();
   }
 
   async handleSelection(wallpaper) {
     const { name, uniqueId } = wallpaper;
+    // grid mode may not have colours/themes for this wallpaper yet
+    if (!this.themeManager.getCachedColours(uniqueId)) {
+      await this.themeManager.ensureWallpaper(uniqueId, name);
+    }
     const promises = [
       this.themeManager.setThemes(uniqueId, name),
       this.setWallpaper(name),

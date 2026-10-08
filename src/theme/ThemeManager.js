@@ -3,6 +3,7 @@ import { log, notify } from "../core/utils/ui.js";
 import { promiseQueueWithLimit } from "../core/utils/async.js";
 import workerPromise from "../extensions/ExtensionHandler.js";
 import { OS, STD, HOME_DIR, SystemError, execAsync, Color } from "../core/constants.js";
+import { magickSlots, makeThumbnail } from "../wallpaper/thumbnails.js";
 
 /**
  * @typedef {import('../core/types.d.ts').ColoursCache} ColoursCache
@@ -43,29 +44,12 @@ class Theme {
     `${HOME_DIR}/.cache/WallRizz/colours.json`; // Made static to share it with UI class
 
   async createColoursCacheFromWallpapers() {
-    const getColoursFromWallpaper = async (wallpaperPath) => {
-      const result = await execAsync(
-        this.config.colorExtractionCommand.replace("{}", wallpaperPath),
-      );
-      const colors = result
-        .split("\n")
-        .map((line) => line.split(" ").filter((word) => Color(word).isValid()))
-        .flat()
-        .map((color) => Color(color).toHexString());
-      if (!colors.length) {
-        throw new SystemError(
-          "Color extraction failed.",
-          "Make sure the backend is extracting colors correctly.",
-        );
-      }
-      return colors;
-    };
-
     const queue = this.wallpaper
       .filter((wp) => !this.getCachedColours(wp.uniqueId))
       .map((wp) => async () => {
-        const wallpaperPath = `${this.wallpaperDir}${wp.uniqueId}`;
-        const colours = await getColoursFromWallpaper(wallpaperPath);
+        const colours = await this.extractColours(
+          this.config.wallpapersDirectory.concat(wp.name),
+        );
         Theme.coloursCache[wp.uniqueId] = colours;
       });
 
@@ -118,7 +102,7 @@ class Theme {
     }
   }
 
-  async createAppThemesFromColours() {
+  async createAppThemesFromColours(wallpapers = this.wallpaper) {
     const isThemeConfCached = (wallpaperName, scriptName) => {
       const cacheDir = `${this.appThemeCacheDir[scriptName]}${
         this.getThemeName(wallpaperName, "light")
@@ -137,14 +121,9 @@ class Theme {
 
     const promises = [];
 
-    for (const wallpaper of this.wallpaper) {
+    for (const wallpaper of wallpapers) {
       const colours = this.getCachedColours(wallpaper.uniqueId);
-      if (!colours) {
-        throw new Error(
-          "Cache miss\n" +
-            `Wallpaper: ${wallpaper.name}, Colours cache id: ${wallpaper.uniqueId}`,
-        );
-      }
+      if (!colours) continue; // not generated yet (grid mode does it on demand)
       for (
         const [scriptName, themeHandler] of Object.entries(
           this.themeExtensionScripts,
@@ -228,6 +207,83 @@ class Theme {
    * @param {string} cacheName - Unique identifier for the wallpaper
    * @returns {string[] | null} Array of colour hex codes or null if not found
    */
+  /**
+   * Colours (and theme configs) for one wallpaper, generated on demand:
+   * grid mode doesn't pre-generate them. Also used to fill the rest in
+   * quietly once the visible thumbnails are done.
+   */
+  async ensureWallpaper(uniqueId, name) {
+    ensureDir(this.wallpaperThemeCacheDir);
+    if (!this.getCachedColours(uniqueId)) {
+      const wallpaperPath = this.config.wallpapersDirectory.concat(name);
+      const colours = await this.extractColours(wallpaperPath);
+      Theme.coloursCache[uniqueId] = colours;
+      writeFile(
+        JSON.stringify(Theme.coloursCache),
+        Theme.wallpaperColoursCacheFilePath,
+      );
+    }
+    await this.createAppThemesFromColours([{ uniqueId, name }]);
+  }
+
+  /** One wallpaper's palette (same parsing as the bulk pass). */
+  async extractColours(wallpaperPath) {
+    // from the thumbnail (made now if it doesn't exist yet), as before
+    const thumb = await makeThumbnail(wallpaperPath, this.config.thumbnailSize);
+    const result = await magickSlots.run(() =>
+      execAsync(
+        this.config.colorExtractionCommand.replace("{}", thumb ?? wallpaperPath),
+      )
+    );
+    const colors = result
+      .split("\n")
+      .map((line) => line.split(" ").filter((word) => Color(word).isValid()))
+      .flat()
+      .map((color) => Color(color).toHexString());
+    if (!colors.length) {
+      throw new SystemError(
+        "Color extraction failed.",
+        "Make sure the backend is extracting colors correctly.",
+      );
+    }
+    return colors;
+  }
+
+  /**
+   * Quietly generate colours/themes for wallpapers that don't have them
+   * yet, one at a time and only while no thumbnail is being made, so it
+   * never competes with the visible page or its prefetch.
+   * @param {Array} wallpapers
+   * @param {() => boolean} idle - true when the thumbnail pool is idle
+   */
+  fillRemaining(wallpapers, idle) {
+    // only wallpapers whose thumbnail exists (the histogram runs on it);
+    // the others are done when selected
+    const missing = wallpapers.filter((wp) => !this.getCachedColours(wp.uniqueId));
+    let stopped = false;
+    let timer = null;
+    const step = () => {
+      timer = null;
+      if (stopped) return;
+      const i = missing.findIndex((wp) => OS.stat(this.wallpaperDir + wp.uniqueId)[1] === 0);
+      if (i < 0 || !idle()) {
+        if (missing.length) timer = OS.setTimeout(step, 500);
+        return;
+      }
+      const [wp] = missing.splice(i, 1);
+      this.ensureWallpaper(wp.uniqueId, wp.name)
+        .catch(() => {})
+        .finally(() => {
+          if (!stopped) timer = OS.setTimeout(step, 0);
+        });
+    };
+    timer = OS.setTimeout(step, 500);
+    return () => {
+      stopped = true;
+      if (timer) OS.clearTimeout(timer);
+    };
+  }
+
   getCachedColours(cacheName) {
     if (Theme.coloursCache[cacheName]) return Theme.coloursCache[cacheName];
 

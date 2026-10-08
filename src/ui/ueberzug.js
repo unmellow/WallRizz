@@ -24,6 +24,7 @@
  * `onDeath(reason)`; the caller decides whether to restart or fall back.
  */
 import { OS, STD } from "../core/constants.js";
+import { abortThumbnails } from "../wallpaper/thumbnails.js";
 import {
   ueberzugAdd,
   ueberzugRemove,
@@ -53,6 +54,7 @@ export function installUeberzugSignalHandlers(cleanup) {
   for (const [sig, code] of [[OS.SIGINT, 130], [OS.SIGTERM, 143], [OS.SIGHUP, 129]]) {
     OS.signal(sig, () => {
       stopAllUeberzug();
+      abortThumbnails();
       try {
         onSignalCleanup?.();
       } catch { /* ignore */ }

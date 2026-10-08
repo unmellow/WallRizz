@@ -26,7 +26,7 @@ ifeq ($(QJSC),quickjs/qjsc)
 src/WallRizz: quickjs/qjsc
 endif
 src/WallRizz: $(SOURCES)
-	cd src && $(abspath $(QJSC)) -flto -D extensions/ExtensionHandlerWorker.js -o WallRizz main.js
+	cd src && $(abspath $(QJSC)) -flto -D extensions/ExtensionHandlerWorker.js -D wallpaper/thumbWorker.js -o WallRizz main.js
 
 quickjs/qjs:
 	$(MAKE) -C quickjs -j$(JOBS) qjs
@@ -40,10 +40,12 @@ test: quickjs/qjs src/WallRizz
 	HOME=/tmp/wallrizz-tile-home quickjs/qjs --std --module tests/tileCache.test.js /tmp/wallrizz-tile-home/thumb.png
 	quickjs/qjs --std --module tests/ueberzug.test.js tests/mock-ueberzugpp /tmp/wallrizz-ueberzug-test.log
 	python3 tests/gallery-resize.test.py src/WallRizz tests/mock-ueberzugpp /tmp/wallrizz-resize-test
+	cd src && ../quickjs/qjs --std --module ../tests/thumbnails.test.js $(abspath tests/mock-magick-slow) /tmp/wallrizz-thumbnails-test
 	@if command -v chafa >/dev/null; then \
 		tests/probe.test.sh src/WallRizz /tmp/wallrizz-probe-test && \
-		python3 tests/gallery-ueberzug.test.py src/WallRizz tests/mock-ueberzugpp /tmp/wallrizz-gallery-test; \
-	else echo "probe / gallery-ueberzug tests skipped: chafa not installed"; fi
+		python3 tests/gallery-ueberzug.test.py src/WallRizz tests/mock-ueberzugpp /tmp/wallrizz-gallery-test && \
+		python3 tests/gallery-thumbs.test.py src/WallRizz tests/mock-magick-slow /tmp/wallrizz-thumbs-test; \
+	else echo "probe / gallery-ueberzug / gallery-thumbs tests skipped: chafa not installed"; fi
 
 install: src/WallRizz
 	install -Dm755 src/WallRizz "$(DESTDIR)$(BINDIR)/WallRizz"

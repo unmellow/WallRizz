@@ -161,7 +161,7 @@ export function parseArguments() {
       [argNames.processLimit]: arg
         .num()
         .min(1)
-        .desc("Number of execution threads used. (default: auto)"),
+        .desc("Thumbnail worker threads, and the cap on ImageMagick processes. (default: min(4, CPUs))"),
       [argNames.inspection]: arg
         .flag(false)
         .desc("Enable log for inspection."),

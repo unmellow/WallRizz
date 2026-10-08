@@ -15,6 +15,7 @@
  * sent with width/height in cells and preserveAspectRatio=1.
  */
 import { OS, STD, HOME_DIR, execAsync } from "../core/constants.js";
+import { magickSlots } from "../wallpaper/thumbnails.js";
 import { ensureDir } from "../core/utils/io.js";
 import { buildChafaArgs, chafaFeatures, renderWithChafaArgs } from "./terminalImage.js";
 
@@ -222,7 +223,9 @@ export class TileCache {
   async encode(thumbPath, columns, rows, k) {
     let value;
     if (this.protocol === "iterm") {
-      const { b64, size } = await encodeJpegPayload(thumbPath, `${k.disk}.jpg`);
+      const { b64, size } = await magickSlots.run(() =>
+        encodeJpegPayload(thumbPath, `${k.disk}.jpg`)
+      );
       value = `${size}\n${b64}`;
     } else {
       value = await renderWithChafaArgs(

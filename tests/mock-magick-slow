@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Slow stand-in for ImageMagick's thumbnail batches (tests).
+
+A WallRizz thumbnail batch ("... ( SRC ... -write PNG:TMP +delete ) ... null:")
+is answered slowly: MOCK_MAGICK_DELAY seconds (default 1) per image, the
+temp file written half first, then the rest after the pause (so a kill
+mid-batch leaves a partial temp file behind unless WallRizz removes it).
+The output is a copy of MOCK_MAGICK_TEMPLATE_DIR/<name>.png, else of
+MOCK_MAGICK_TEMPLATE (real PNGs). Every batch logs
+"START <t> <pid> <src...>" and "END <t> <pid>" to MOCK_MAGICK_LOG. Any other
+invocation (identify, colour histogram, JPEG encode) runs the real magick
+at MOCK_MAGICK_REAL. Everything happens in this one process: a SIGKILL
+leaves no helper behind.
+"""
+import os, sys, time
+
+args = sys.argv[1:]
+log = os.environ.get("MOCK_MAGICK_LOG")
+
+
+def note(line):
+    if log:
+        fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        os.write(fd, (line + "\n").encode())
+        os.close(fd)
+
+
+if "null:" not in args or "-write" not in args:
+    # anything else (identify, colour histogram, JPEG encode): the real
+    # magick, logged too so the process cap covers every magick
+    import subprocess
+    real = os.environ.get("MOCK_MAGICK_REAL", "/usr/bin/magick")
+    note(f"START {time.time():.3f} {os.getpid()} PASS")
+    try:
+        code = subprocess.run([real] + args).returncode
+    finally:
+        note(f"END {time.time():.3f} {os.getpid()}")
+    sys.exit(code)
+
+items = []
+for i, a in enumerate(args):
+    if a == "(":
+        items.append({"src": args[i + 1]})
+    elif a == "-write" and items:
+        items[-1]["tmp"] = args[i + 1].split(":", 1)[1]
+delay = float(os.environ.get("MOCK_MAGICK_DELAY", "1"))
+tdir = os.environ.get("MOCK_MAGICK_TEMPLATE_DIR")
+
+
+def template(src):
+    """MOCK_MAGICK_TEMPLATE_DIR/<name>.png (a colour per wallpaper), else
+    MOCK_MAGICK_TEMPLATE"""
+    if tdir:
+        p = os.path.join(tdir, os.path.splitext(os.path.basename(src))[0] + ".png")
+        if os.path.exists(p):
+            return open(p, "rb").read()
+    return open(os.environ["MOCK_MAGICK_TEMPLATE"], "rb").read()
+
+
+note(f"START {time.time():.3f} {os.getpid()} " + " ".join(it["src"] for it in items))
+for it in items:
+    data = template(it["src"])
+    with open(it["tmp"], "wb") as f:
+        f.write(data[: len(data) // 2])
+        f.flush()
+        time.sleep(delay)
+        f.write(data[len(data) // 2:])
+note(f"END {time.time():.3f} {os.getpid()}")

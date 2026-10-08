@@ -15,6 +15,8 @@ class UserInterface {
    * @param {Function} getWallpaperPath
    * @param {Function} handleFocus
    * @param {Object} config
+   * @param {Function} [onGalleryReady] - grid: called once the first page is
+   *   drawn with an idle() probe; returns a stop function
    */
   constructor(
     wallpaperList,
@@ -23,6 +25,7 @@ class UserInterface {
     getWallpaperPath,
     handleFocus,
     config,
+    onGalleryReady,
   ) {
     this.wallpapers = wallpaperList;
     this.wallpapersDir = wallpapersDirectory;
@@ -30,6 +33,7 @@ class UserInterface {
     this.getWallpaperPath = getWallpaperPath;
     this.handleFocus = handleFocus;
     this.config = config;
+    this.onGalleryReady = onGalleryReady;
   }
 
   /**
@@ -61,6 +65,7 @@ class UserInterface {
       this.handleSelection,
       this.getWallpaperPath,
       this.handleFocus,
+      this.onGalleryReady,
     );
     await galleryView.render();
   }
