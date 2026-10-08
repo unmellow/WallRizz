@@ -1,6 +1,8 @@
 // Run with: qjs --module tests/imageProtocol.test.js   (or: node tests/imageProtocol.test.js)
 import {
   chafaArgs,
+  chafaSymbolOptions,
+  parseChafaFeatures,
   da1HasSixel,
   detectBrand,
   normalizeProtocol,
@@ -118,6 +120,26 @@ eq(
   "chafa args passthrough",
   chafaArgs("iterm", 30, 10, {}, { passthroughNone: true }).slice(-2),
   ["--passthrough", "none"],
+);
+
+// chafa feature detection / symbol options
+const HELP_114 = "  -w, --work=NUM  How hard\n      --passthrough=MODE\nAccepted classes for --symbols and --fill:\n  all ascii braille\n  ambiguous border dot hhalf legacy sextant technical wide\n";
+const HELP_116 = HELP_114.replace("sextant", "sextant octant");
+const HELP_OLD = "  -w, --work=NUM\nAccepted classes for --symbols and --fill:\n  all ascii block half quad\n";
+const f114 = parseChafaFeatures("Chafa version 1.14.5\n", HELP_114);
+eq("features 1.14", f114, { version: "1.14.5", sextant: true, octant: false, work: true, passthrough: true });
+eq("features 1.16 octant", parseChafaFeatures("Chafa version 1.16.2", HELP_116).octant, true);
+eq("features old", parseChafaFeatures("Chafa version 1.6.0", HELP_OLD), { version: "1.6.0", sextant: false, octant: false, work: true, passthrough: false });
+eq("symbols alacritty+sextant", chafaSymbolOptions(f114, "alacritty"), ["--symbols", "sextant+quad+half+block+space", "--work", "9"]);
+eq("symbols unknown terminal", chafaSymbolOptions(f114, "unknown"), ["--symbols", "quad+half+block+space", "--work", "9"]);
+eq("symbols old chafa without sextant", chafaSymbolOptions(parseChafaFeatures("Chafa version 1.6.0", HELP_OLD), "alacritty"), ["--symbols", "quad+half+block+space", "--work", "9"]);
+eq("symbols no --work -> chafa defaults", chafaSymbolOptions({ version: "1.0", sextant: false, octant: false, work: false }, "alacritty"), []);
+eq("symbols no chafa info -> defaults", chafaSymbolOptions(null, "alacritty"), []);
+eq("symbols env override", chafaSymbolOptions(f114, "unknown", { WALLRIZZ_CHAFA_SYMBOLS: "all" }), ["--symbols", "all", "--work", "9"]);
+eq(
+  "chafa args symbols with options",
+  chafaArgs("symbols", 10, 5, { COLORTERM: "truecolor" }, { symbolOptions: ["--work", "9"] }).slice(-4),
+  ["-c", "full", "--work", "9"],
 );
 
 log(`imageProtocol tests: ${passed} passed, ${failed} failed`);

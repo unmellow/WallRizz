@@ -251,6 +251,53 @@ export function chafaFormat(protocol) {
 }
 
 /**
+ * Parse chafa capabilities from `chafa --version` and `chafa --help` output.
+ * @param {string} versionText
+ * @param {string} helpText
+ * @returns {{version: string, sextant: boolean, octant: boolean, work: boolean, passthrough: boolean}}
+ */
+export function parseChafaFeatures(versionText = "", helpText = "") {
+  const version = /version\s+(\d+\.\d+(?:\.\d+)?)/i.exec(versionText)?.[1] ?? "unknown";
+  // symbol class list is a table of words after "Accepted classes"
+  const classes = helpText.split(/Accepted classes/i)[1] ?? "";
+  return {
+    version,
+    sextant: /\bsextant\b/.test(classes),
+    octant: /\boctant\b/.test(classes),
+    work: /--work\b/.test(helpText),
+    passthrough: /--passthrough\b/.test(helpText),
+  };
+}
+
+// Terminals known to draw Unicode 13 sextants (U+1FB00..1FB3B) with a built-in
+// font, so they line up with the block elements (Alacritty >= 0.13). Octants
+// (U+1CD00, chafa >= 1.16) are not in Alacritty's built-in font, so they are
+// only used when explicitly requested.
+const SEXTANT_BRANDS = new Set(["alacritty", "kitty", "ghostty", "foot", "wezterm"]);
+
+/**
+ * Extra chafa options for the symbols protocol (finer symbols, more work).
+ * Falls back to [] (chafa defaults, the pre-1.6 WallRizz behaviour) on chafa
+ * builds without the needed features.
+ * @param {object} features - parseChafaFeatures() result (or null)
+ * @param {string} [brand] - detected terminal brand
+ * @param {Record<string,string>} [env]
+ * @returns {string[]}
+ */
+export function chafaSymbolOptions(features, brand, env = {}) {
+  if (!features) return [];
+  const work = features.work ? ["--work", "9"] : [];
+  const custom = env.WALLRIZZ_CHAFA_SYMBOLS;
+  if (custom) return ["--symbols", custom, ...work];
+  if (!features.work) return [];
+  if (features.sextant && SEXTANT_BRANDS.has(brand)) {
+    return ["--symbols", "sextant+quad+half+block+space", ...work];
+  }
+  // quadrants / half / eighth blocks are U+2580..259F: present in nearly every font
+  return ["--symbols", "quad+half+block+space", ...work];
+}
+
+/**
  * Build the chafa argument vector for drawing an image into a WxH cell box.
  * @param {string} protocol
  * @param {number} columns
@@ -258,6 +305,7 @@ export function chafaFormat(protocol) {
  * @param {Record<string,string>} env
  * @param {object} [opts]
  * @param {boolean} [opts.passthroughNone] - add "--passthrough none" (chafa >= 1.14)
+ * @param {string[]} [opts.symbolOptions] - chafaSymbolOptions() result
  * @returns {string[]}
  */
 export function chafaArgs(protocol, columns, rows, env, opts = {}) {
@@ -278,6 +326,7 @@ export function chafaArgs(protocol, columns, rows, env, opts = {}) {
       "-c",
       colorterm === "truecolor" || colorterm === "24bit" ? "full" : "256",
     );
+    if (opts.symbolOptions) args.push(...opts.symbolOptions);
   }
   if (opts.passthroughNone) args.push("--passthrough", "none");
   return args;

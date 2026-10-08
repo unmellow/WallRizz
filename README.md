@@ -55,7 +55,15 @@ WallRizz picks an image protocol for the grid and list views automatically, the 
 
 `TERM` is checked first, then `TERM_PROGRAM`, then terminal-specific variables, so a variable leaked from a parent terminal (for example `KITTY_WINDOW_ID` inside foot started from kitty) doesn't win. Inside tmux/screen/zellij, graphics passthrough isn't attempted: you get sixel when the multiplexer advertises it (tmux 3.4+ built with sixel), otherwise symbols.
 
-Every protocol except `kitty` is drawn with [chafa](https://hpjansson.org/chafa/) (`chafa -f iterm|sixels|symbols -s WxH`), so chafa needs to be installed. The list view relies on fzf passing sixel/iTerm2 output from the preview command through to the terminal (fzf >= 0.44; WallRizz already needs >= 0.63 for its footer).
+How the non-kitty protocols are drawn:
+
+- `sixel` and `symbols` use [chafa](https://hpjansson.org/chafa/) (`chafa -f sixels|symbols -s WxH`), so chafa needs to be installed.
+- `iterm` doesn't use chafa: chafa's iTerm2 encoder sends an uncompressed TIFF, about 1.6 MB per tile on a HiDPI screen. WallRizz converts the thumbnail to a JPEG once (ImageMagick) and sends it with its size in cells and `preserveAspectRatio=1`, which is roughly 40x less data per page.
+- `symbols` uses finer symbols and chafa's highest quality setting (`--work 9`). With chafa >= 1.8 in Alacritty, kitty, Ghostty, foot or WezTerm it uses `--symbols sextant+quad+half+block+space` (those terminals draw sextants with a built-in font, so they line up); elsewhere it uses `quad+half+block+space`. Older chafa without `--work` keeps chafa's defaults. Octants (chafa >= 1.16) aren't used by default because Alacritty's built-in font doesn't have them; set `WALLRIZZ_CHAFA_SYMBOLS` (e.g. `octant+sextant+quad+half+block`, or `all`) to pick the symbol classes yourself.
+
+Speed: tiles are always encoded from the small cached thumbnails (`~/.cache/WallRizz/pic/`), never from the full-size wallpapers. The encoded output is cached in memory and on disk in `~/.cache/WallRizz/tiles/`, keyed by thumbnail, protocol, cell box, cell pixel size (sixel) and encoder options, so going back to a page or relaunching doesn't re-encode. Tiles are encoded in parallel (limited by `-x/--plimit`), drawn as soon as each one is ready, and the next page is encoded in the background. The grid stays responsive while a page is still loading. Fullscreen still uses the full-size wallpaper. Delete `~/.cache/WallRizz/tiles/` to reclaim the disk space.
+
+The list view runs `WallRizz --render-tile` as fzf's preview command, which uses the same cache. It relies on fzf passing sixel/iTerm2 output from the preview command through to the terminal (fzf >= 0.44; WallRizz already needs >= 0.63 for its footer).
 
 Override the detection with a flag or an environment variable (the flag wins):
 

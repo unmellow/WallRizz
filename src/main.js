@@ -9,6 +9,7 @@ import { UserInterface } from "./ui/UserInterface.js";
 import { testExtensions } from "./extensions/ExtensionHandler.js";
 import { checkForUpdate } from "./core/utils/app.js";
 import { getImageProtocol } from "./ui/terminalImage.js";
+import { TileCache } from "./ui/tileCache.js";
 
 class WallRizz {
   constructor() {
@@ -19,6 +20,7 @@ class WallRizz {
 
   async run() {
     try {
+      await this.handleRenderTile();
       this.handleShowKeymaps();
       this.handleWhichImageProtocol();
       await this.handleRunUpdate();
@@ -63,6 +65,28 @@ class WallRizz {
   handleShowKeymaps() {
     if (!this.config.showKeyMap) return;
     UserInterface.printKeyMaps();
+    throw EXIT;
+  }
+
+  // Used by the list view's fzf preview: same cache as the grid view.
+  async handleRenderTile() {
+    if (!this.config.renderTile) return;
+    const protocol = this.config.imageProtocol;
+    if (!["iterm", "sixel", "symbols"].includes(protocol)) throw EXIT;
+    const columns = Number(STD.getenv("FZF_PREVIEW_COLUMNS")) || 40;
+    const lines = Number(STD.getenv("FZF_PREVIEW_LINES")) || 20;
+    // keep pixel images off the last line so they can't scroll the screen
+    const rows = protocol === "symbols" ? lines : Math.max(1, lines - 1);
+    const tiles = new TileCache({
+      protocol,
+      cellPx: STD.getenv("WALLRIZZ_CELL_PX"),
+      limit: 1,
+    });
+    const out = await tiles.get(this.config.renderTile, columns, rows);
+    if (out) {
+      STD.out.puts(out.replace(/\n+$/, ""));
+      STD.out.flush();
+    }
     throw EXIT;
   }
 

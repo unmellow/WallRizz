@@ -9,8 +9,14 @@ import {
   eraseDown,
   exitAlternativeScreen,
 } from "../../helpers/cursor.js";
-import { handleKeysPress, keySequences } from "../../helpers/terminal.js";
-import { positionOutput, renderWithChafa } from "./terminalImage.js";
+import {
+  handleKeysPress,
+  handleKeysPressAsync,
+  keySequences,
+} from "../../helpers/terminal.js";
+import { positionOutput, queryCellSize, renderWithChafa } from "./terminalImage.js";
+import { encodeJpegPayload, itermEscape, TileCache } from "./tileCache.js";
+import { getProcessLimit } from "../core/utils/async.js";
 
 export class GalleryView {
   constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath, onFocus) {
@@ -33,6 +39,16 @@ export class GalleryView {
     }));
 
     const [terminalWidth, terminalHeight] = OS.ttyGetWinSize();
+
+    if (!this.isKitty) {
+      // sixel tiles depend on the cell pixel size: ask once, before raw mode
+      const cellPx = this.protocol === "sixel" ? queryCellSize() : null;
+      this.tiles = new TileCache({
+        protocol: this.protocol,
+        cellPx,
+        limit: this.config.processLimit ?? Math.max(1, await getProcessLimit()),
+      });
+    }
 
     const gridSize = this.config.enablePagination
       ? `${this.config.gridSize[1]}x${this.config.gridSize[0]}`
@@ -176,12 +192,20 @@ export class GalleryView {
       filePath = cropFile;
     }
 
-    const output = await renderWithChafa(
-      this.protocol,
-      filePath,
-      size?.columns ?? 20,
-      size?.rows ?? 10,
-    );
+    const columns = size?.columns ?? 20;
+    const rows = size?.rows ?? 10;
+    let output;
+    if (this.protocol === "iterm") {
+      // compressed JPEG instead of chafa's uncompressed TIFF
+      const { b64, size: bytes } = await encodeJpegPayload(
+        filePath,
+        `${HOME_DIR}/.cache/WallRizz/fullscreen.jpg`,
+        2560,
+      );
+      output = itermEscape(b64, bytes, columns, rows);
+    } else {
+      output = await renderWithChafa(this.protocol, filePath, columns, rows);
+    }
     const x = position?.row ?? 0;
     const y = position?.column ?? 1;
     STD.out.puts(positionOutput(this.protocol, output, x, y));
@@ -301,7 +325,70 @@ export class GalleryView {
       STD.out.flush();
     };
 
+    const tileBox = (i) => {
+      const coord = coordinates[i];
+      return {
+        rows: cellHeight - cellPadding.horizontal * 2,
+        columns: cellWidth - cellPadding.vertical * 2,
+        x: coord[0] + cellPadding.vertical,
+        y: coord[1] + cellPadding.horizontal,
+      };
+    };
+
+    // Non-kitty pages: frame first, then tiles drawn progressively as they
+    // come out of the (cached, bounded, parallel) encoder. Returns without
+    // waiting so keys stay responsive; stale tiles of a previous page are
+    // never drawn (generation check) and their pending encodes are dropped.
+    let pageGeneration = 0;
+    const renderPageTiles = (skipFocus = false) => {
+      STD.out.puts(clearTerminal);
+      highlightedCell = null;
+      const generation = ++pageGeneration;
+      this.tiles.cancelPending();
+      renderHighlight(currentCell);
+
+      const draw = (box, out) => {
+        if (out === null || generation !== pageGeneration || this.fullscreen) return;
+        STD.out.puts(positionOutput(this.protocol, out, box.x, box.y));
+        STD.out.flush();
+      };
+
+      const startIdx = currentPage * maxCellsInGrid;
+      const pending = [];
+      for (let i = 0; i < maxCellsInGrid && startIdx + i < pngs.length; i++) {
+        const box = tileBox(i);
+        const thumb = pngs[startIdx + i].filePath;
+        const cached = this.tiles.peek(thumb, box.columns, box.rows);
+        if (cached !== null) {
+          draw(box, cached);
+          continue;
+        }
+        pending.push(
+          this.tiles.get(thumb, box.columns, box.rows)
+            .then((out) => draw(box, out))
+            .catch(() => {}),
+        );
+      }
+
+      // prefetch the next page in the background (encode only, no drawing)
+      Promise.all(pending).then(() => {
+        if (generation !== pageGeneration) return;
+        const nextStart = (currentPage + 1) * maxCellsInGrid;
+        for (let i = 0; i < maxCellsInGrid && nextStart + i < pngs.length; i++) {
+          const box = tileBox(i);
+          this.tiles.get(pngs[nextStart + i].filePath, box.columns, box.rows, { low: true })
+            .catch(() => {});
+        }
+      });
+
+      const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
+      if (!skipFocus && pngs[globalIndex]) {
+        onFocus(pngs[globalIndex], globalIndex);
+      }
+    };
+
     const renderPage = async (skipFocus = false) => {
+      if (!this.isKitty) return renderPageTiles(skipFocus);
       STD.out.puts(clearTerminal);
       highlightedCell = null;
 
@@ -404,6 +491,7 @@ export class GalleryView {
     const toggleFullscreen = async () => {
       const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
       if (pngs[globalIndex]) {
+        this.fullscreen = !isFullScreen;
         if (isFullScreen = !isFullScreen) {
           print(enterAlternativeScreen);
           zoomLevel = 1.0;
@@ -524,7 +612,10 @@ export class GalleryView {
       exit();
     };
 
-    await handleKeysPress({
+    // kitty keeps the original blocking key reader; the other protocols need
+    // the event loop to keep running between keys (progressive tiles,
+    // background prefetch).
+    await (this.isKitty ? handleKeysPress : handleKeysPressAsync)({
       [keySequences.ArrowDown]: () => {
         if (isFullScreen && zoomLevel > 1) return panDown();
         moveSelectionDown();

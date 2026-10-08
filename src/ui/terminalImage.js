@@ -6,7 +6,9 @@ import { OS, STD, SystemError } from "../core/constants.js";
 import { Process, ProcessSync } from "../../qjs-ext-lib/src/process.js";
 import {
   chafaArgs,
+  chafaSymbolOptions,
   detectMultiplexer,
+  parseChafaFeatures,
   resolveImageProtocol,
 } from "./imageProtocol.js";
 import { cursorTo } from "../../helpers/cursor.js";
@@ -42,16 +44,98 @@ export function queryDA1() {
 }
 
 /**
+ * Ask the terminal for its cell size in pixels (XTWINOPS CSI 16 t), with a
+ * DA1 query as sentinel so terminals that ignore CSI 16 t don't stall us.
+ * @returns {string|null} "WxH" or null
+ */
+export function queryCellSize() {
+  const script = [
+    "exec 3<>/dev/tty || exit 1",
+    'old=$(stty -g <&3) || exit 1',
+    "stty raw -echo min 0 time 5 <&3",
+    "printf '\\033[16t\\033[c' >&3",
+    'resp=""',
+    'while IFS= read -r -s -n1 -t 0.5 ch <&3; do resp+="$ch"; [[ $ch == c ]] && break; done',
+    'stty "$old" <&3',
+    'printf "%s" "${resp//$\'\\033\'/}"',
+  ].join("\n");
+  try {
+    const p = new ProcessSync(["bash", "-c", script], {
+      passStderr: false,
+      passStdout: false,
+    });
+    p.run();
+    const m = /\[6;(\d+);(\d+)t/.exec(p.stdout || "");
+    return m ? `${m[2]}x${m[1]}` : null;
+  } catch {
+    return null;
+  }
+}
+
+let features;
+/**
+ * chafa capabilities (version, sextant/octant symbols, --work), detected once
+ * and cached on disk keyed by the chafa binary's path/mtime/size, so the
+ * per-preview --render-tile process doesn't spawn chafa twice just to ask.
+ */
+export function chafaFeatures() {
+  if (features !== undefined) return features;
+  const bin = findCommand("chafa");
+  if (!bin) return (features = null);
+  const [st] = OS.stat(bin);
+  const stamp = `${bin}|${st?.mtime}|${st?.size}`;
+  const cacheFile = `${STD.getenv("HOME")}/.cache/WallRizz/chafa-features.json`;
+  try {
+    const cached = JSON.parse(STD.loadFile(cacheFile) ?? "null");
+    if (cached?.stamp === stamp) return (features = cached.features);
+  } catch { /* ignore */ }
+  try {
+    const v = new ProcessSync(["chafa", "--version"], { passStderr: false });
+    v.run();
+    const h = new ProcessSync(["chafa", "--help"], { passStderr: false });
+    h.run();
+    features = v.success ? parseChafaFeatures(v.stdout, h.stdout) : null;
+  } catch {
+    features = null;
+  }
+  try {
+    const f = STD.open(cacheFile, "w");
+    if (f) {
+      f.puts(JSON.stringify({ stamp, features }));
+      f.close();
+    }
+  } catch { /* ignore */ }
+  return features;
+}
+
+let terminalBrand = STD.getenv("WALLRIZZ_TERMINAL") ?? "unknown";
+/** Terminal brand used to pick chafa symbol sets (set after detection). */
+export function setTerminalBrand(brand) {
+  if (brand && brand !== "override") terminalBrand = brand;
+}
+export function getTerminalBrand() {
+  return terminalBrand;
+}
+
+/**
  * @param {string} cmd
  * @returns {boolean} whether `cmd` is an executable in PATH
  */
 export function commandExists(cmd) {
+  return findCommand(cmd) !== null;
+}
+
+/** @returns {string|null} full path of `cmd` in PATH */
+export function findCommand(cmd) {
   const path = STD.getenv("PATH") ?? "";
-  return path.split(":").filter(Boolean).some((dir) => {
+  for (const dir of path.split(":").filter(Boolean)) {
     const [st, err] = OS.stat(`${dir}/${cmd}`);
-    return err === 0 && (st.mode & OS.S_IFMT) === OS.S_IFREG &&
-      (st.mode & 0o111) !== 0;
-  });
+    if (
+      err === 0 && (st.mode & OS.S_IFMT) === OS.S_IFREG &&
+      (st.mode & 0o111) !== 0
+    ) return `${dir}/${cmd}`;
+  }
+  return null;
 }
 
 let resolved = null;
@@ -73,7 +157,11 @@ export function getImageProtocol(config) {
   } catch (e) {
     throw new SystemError("Invalid image protocol", e.message);
   }
-  if (resolved.protocol !== "kitty" && !commandExists("chafa")) {
+  setTerminalBrand(resolved.terminal);
+  if (
+    (resolved.protocol === "sixel" || resolved.protocol === "symbols") &&
+    !commandExists("chafa")
+  ) {
     throw new SystemError(
       `chafa is required to draw images with the "${resolved.protocol}" protocol (${resolved.source}).`,
       "Install chafa, or force kitty graphics with --image-protocol kitty / WALLRIZZ_IMAGE_PROTOCOL=kitty.",
@@ -82,19 +170,8 @@ export function getImageProtocol(config) {
   return resolved;
 }
 
-let chafaHasPassthrough;
 function passthroughNoneNeeded(env) {
-  if (!detectMultiplexer(env)) return false;
-  if (chafaHasPassthrough === undefined) {
-    try {
-      const p = new ProcessSync(["chafa", "--help"], { passStderr: false });
-      p.run();
-      chafaHasPassthrough = p.stdout.includes("--passthrough");
-    } catch {
-      chafaHasPassthrough = false;
-    }
-  }
-  return chafaHasPassthrough;
+  return Boolean(detectMultiplexer(env) && chafaFeatures()?.passthrough);
 }
 
 /**
@@ -104,6 +181,9 @@ export function buildChafaArgs(protocol, columns, rows) {
   const env = STD.getenviron();
   return chafaArgs(protocol, columns, rows, env, {
     passthroughNone: passthroughNoneNeeded(env),
+    symbolOptions: protocol === "symbols"
+      ? chafaSymbolOptions(chafaFeatures(), terminalBrand, env)
+      : undefined,
   });
 }
 
@@ -113,8 +193,14 @@ export function buildChafaArgs(protocol, columns, rows) {
  * TIOCGWINSZ; stdout goes to a temp file so UTF-8 is decoded in one piece.
  * @returns {Promise<string>}
  */
-export async function renderWithChafa(protocol, filePath, columns, rows) {
-  const p = new Process([...buildChafaArgs(protocol, columns, rows), filePath], {
+export function renderWithChafa(protocol, filePath, columns, rows) {
+  return renderWithChafaArgs([...buildChafaArgs(protocol, columns, rows), filePath]);
+}
+
+/** Run a full chafa argv (see renderWithChafa) and return its raw output. */
+export async function renderWithChafaArgs(argv) {
+  const filePath = argv.at(-1);
+  const p = new Process(argv, {
     streamStdout: false,
     trim: false,
   });

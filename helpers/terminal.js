@@ -1,4 +1,4 @@
-import { isatty, ttyGetWinSize } from "os";
+import { isatty, ttyGetWinSize, setReadHandler, read as osRead, setTimeout as osSetTimeout, clearTimeout as osClearTimeout } from "os";
 import { in as stdin, getenv } from "std";
 
 /**
@@ -243,4 +243,94 @@ let count = 0;
 //   [keySequences.Backspace]: (key, quit) => { print('back!!'); quit() }
 // })
 
-export { getTerminalSize, handleKeysPress, handleKeysPressSync, keySequences };
+/**
+ * Event-loop friendly variant of handleKeysPress: stdin is read through
+ * os.setReadHandler instead of a blocking read, so timers / child process
+ * completions (progressive image tiles, background prefetch) keep running
+ * while waiting for a key. Handlers run one at a time, in key order.
+ * Resolves once a handler calls quit().
+ *
+ * @param {Object<string, Function>} keysAndCb
+ * @returns {Promise<void>}
+ */
+const handleKeysPressAsync = (keysAndCb) =>
+  new Promise((resolve, reject) => {
+    const keys = Object.keys(keysAndCb);
+    let exit = false;
+    const quit = () => (exit = true);
+    let pending = "";
+    let escTimer = null;
+    let chain = Promise.resolve();
+    const buf = new Uint8Array(64);
+
+    const finish = () => {
+      setReadHandler(0, null);
+      if (escTimer) osClearTimeout(escTimer);
+      resolve();
+    };
+
+    const dispatch = (seq) => {
+      chain = chain.then(async () => {
+        if (exit) return;
+        if (seq === keySequences.Escape + keySequences.Escape) {
+          keys.includes(keySequences.Escape)
+            ? await keysAndCb[keySequences.Escape](seq, quit)
+            : quit();
+        } else if (keys.includes(seq)) {
+          await keysAndCb[seq](seq, quit);
+        } else if (keys.includes("default")) {
+          await keysAndCb["default"](seq);
+        }
+        if (exit) finish();
+      }).catch((e) => {
+        setReadHandler(0, null);
+        reject(e);
+      });
+    };
+
+    const consume = (flush) => {
+      while (pending.length) {
+        if (pending[0] !== "\x1b") {
+          dispatch(pending[0]);
+          pending = pending.slice(1);
+          continue;
+        }
+        // escape sequences: longest known key that matches, or wait for more
+        const match = keys
+          .filter((k) => k.length > 1 && pending.startsWith(k))
+          .sort((a, b) => b.length - a.length)[0];
+        if (match) {
+          dispatch(match);
+          pending = pending.slice(match.length);
+          continue;
+        }
+        if (pending.startsWith("\x1b\x1b")) {
+          dispatch("\x1b\x1b");
+          pending = pending.slice(2);
+          continue;
+        }
+        const couldGrow = keys.some((k) => k.startsWith(pending) && k !== pending);
+        if (couldGrow && !flush) return;
+        // unknown sequence: drop it like the blocking reader does
+        dispatch(pending);
+        pending = "";
+      }
+    };
+
+    setReadHandler(0, () => {
+      const n = osRead(0, buf.buffer, 0, buf.length);
+      if (n <= 0) return;
+      pending += String.fromCharCode(...buf.subarray(0, n));
+      if (escTimer) osClearTimeout(escTimer);
+      consume(false);
+      if (pending.length) escTimer = osSetTimeout(() => consume(true), 50);
+    });
+  });
+
+export {
+  getTerminalSize,
+  handleKeysPress,
+  handleKeysPressAsync,
+  handleKeysPressSync,
+  keySequences,
+};

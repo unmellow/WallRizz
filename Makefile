@@ -35,6 +35,9 @@ test: quickjs/qjs
 	quickjs/qjs --std --module tests/imageProtocol.test.js
 	tests/make-scan-tree.sh /tmp/wallrizz-scan-tree
 	quickjs/qjs --std --module tests/scan.test.js /tmp/wallrizz-scan-tree
+	rm -rf /tmp/wallrizz-tile-home && mkdir -p /tmp/wallrizz-tile-home
+	magick -size 320x180 plasma:fractal -depth 8 /tmp/wallrizz-tile-home/thumb.png
+	HOME=/tmp/wallrizz-tile-home quickjs/qjs --std --module tests/tileCache.test.js /tmp/wallrizz-tile-home/thumb.png
 
 install: src/WallRizz
 	install -Dm755 src/WallRizz "$(DESTDIR)$(BINDIR)/WallRizz"

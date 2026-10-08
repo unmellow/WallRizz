@@ -42,6 +42,7 @@ export function parseArguments() {
     depth: "--depth",
     imageProtocol: "--image-protocol",
     whichImageProtocol: "--which-image-protocol",
+    renderTile: "--render-tile",
   };
 
   // Define and parse command-line arguments using the 'arg' library
@@ -180,6 +181,12 @@ export function parseArguments() {
       [argNames.whichImageProtocol]: arg
         .flag(false)
         .desc("Print the detected image protocol and exit."),
+      [argNames.renderTile]: arg
+        .str()
+        .val("THUMBNAIL")
+        .desc(
+          "Internal (list view preview): print the cached encoded preview of a thumbnail sized to $FZF_PREVIEW_COLUMNS x $FZF_PREVIEW_LINES.",
+        ),
       "-d": argNames.wallpapersDirectory,
       "-r": argNames.setRandomWallpaper,
       "-s": argNames.imageSize,

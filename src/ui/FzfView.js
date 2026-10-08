@@ -3,7 +3,7 @@ import { ProcessSync } from "../../qjs-ext-lib/src/process.js";
 import Fzf from "../../helpers/fzf.js";
 import { Theme } from "../theme/ThemeManager.js";
 import { STD, SystemError, EXIT, OS } from "../core/constants.js";
-import { buildChafaArgs } from "./terminalImage.js";
+import { getTerminalBrand, queryCellSize } from "./terminalImage.js";
 
 export class FzfView {
   constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath) {
@@ -127,21 +127,20 @@ export class FzfView {
   /**
    * fzf (>= 0.44) passes sixel / iTerm2 image sequences printed by the preview
    * command through to the terminal and clips them to the preview window;
-   * symbols output is plain coloured text. The image path is stored base64
-   * encoded on line 2 of each item (for the kitty t=f path), so decode it.
-   * Sixel/iTerm2 images get one row less than the preview height so an image
-   * touching the bottom line can't scroll the screen (junegunn/fzf#2544).
-   * stdin is /dev/tty so chafa can read the cell pixel size.
+   * symbols output is plain coloured text. The preview runs this binary with
+   * --render-tile, which renders the cached *thumbnail* through the same
+   * on-disk tile cache as the grid view (so revisits/relaunches are instant).
+   * The thumbnail path is stored base64 encoded on line 2 of each item (for
+   * the kitty t=f path), so decode it first. stdin is /dev/tty so chafa can
+   * read the cell pixel size.
    */
   chafaPreviewCmd(protocol) {
-    const rows = protocol === "symbols"
-      ? "${FZF_PREVIEW_LINES}"
-      : "$((FZF_PREVIEW_LINES - 1))";
-    // placeholder sizes are replaced by shell expansions at preview time
-    const chafa = buildChafaArgs(protocol, 1, 1)
-      .join(" ")
-      .replace("-s 1x1", () => `-s \${FZF_PREVIEW_COLUMNS}x${rows}`);
-    return `--preview='f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d); ${chafa} "$f" </dev/tty 2>/dev/null'`;
+    const [self] = OS.readlink("/proc/self/exe");
+    const bin = self || "WallRizz";
+    const cellPx = protocol === "sixel" ? queryCellSize() : null;
+    const env = `WALLRIZZ_TERMINAL=${getTerminalBrand()}` +
+      (cellPx ? ` WALLRIZZ_CELL_PX=${cellPx}` : "");
+    return `--preview='f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d); ${env} "${bin}" -P ${protocol} --render-tile "$f" </dev/tty 2>/dev/null'`;
   }
 
   toBase64(str) {
