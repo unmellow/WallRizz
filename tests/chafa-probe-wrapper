@@ -1,14 +1,39 @@
 #!/usr/bin/env bash
-# Test wrapper around the real chafa: claims --probe support (chafa >= 1.16)
-# in --help, logs every render argv to $CHAFA_ARGV_LOG, and strips
-# "--probe X" before running the real chafa (which may be older).
+# Test wrapper around the real chafa, logs every render argv to
+# $CHAFA_ARGV_LOG.
+#
+# Default ("new" chafa >= 1.16): claims --probe in --help. "--probe X" is
+# passed on when the real chafa knows it, and only stripped for an older
+# real chafa. (Stripping it from a new chafa would make that chafa probe
+# the test's pty, which never answers, and stall every render for its
+# probe timeout.)
+#
+# MOCK_CHAFA_OLD=1 ("old" chafa < 1.16): no --probe in --help, version
+# 1.14.0, and --probe is rejected like an unknown option, whatever version
+# the real chafa is.
 self_dir=$(cd "$(dirname "$0")" && pwd)
 real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd:) command -v chafa)
+if [[ -n ${MOCK_CHAFA_OLD:-} ]]; then
+  case "$1" in
+    --help) "$real" --help | grep -v -- '--probe'; exit 0 ;;
+    --version) echo "Chafa version 1.14.0"; exit 0 ;;
+  esac
+  echo "$*" >> "${CHAFA_ARGV_LOG:-/dev/null}"
+  for a in "$@"; do
+    [[ $a == --probe* ]] && { echo "chafa: Unknown option $a" >&2; exit 2; }
+  done
+  exec "$real" "$@"
+fi
 case "$1" in
-  --help) "$real" --help; echo "      --probe=ARG    Probe terminal's capabilities and wait for response"; exit 0 ;;
+  --help)
+    "$real" --help
+    "$real" --help | grep -q -- '--probe' ||
+      echo "      --probe=ARG    Probe terminal's capabilities and wait for response"
+    exit 0 ;;
   --version) exec "$real" --version ;;
 esac
 echo "$*" >> "${CHAFA_ARGV_LOG:-/dev/null}"
+"$real" --help | grep -q -- '--probe' && exec "$real" "$@"
 args=(); skip=0
 for a in "$@"; do
   if ((skip)); then skip=0; continue; fi
