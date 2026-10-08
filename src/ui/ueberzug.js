@@ -80,6 +80,10 @@ export class UeberzugLayer {
    * @param {number} [opts.watchMs] - watchdog period (0 = off)
    * @param {(reason: string) => void} [opts.onDeath] - called once if the
    *   process dies (not after stop())
+   * @param {boolean} [opts.noCache] - pass --no-cache: images are shown at
+   *   their own size, so ueberzugpp must not keep resized copies in
+   *   ~/.cache/ueberzugpp (page composites would pile up there, outside our
+   *   cache cap) and not decode that copy again on every add
    */
   constructor(output, {
     bin = "ueberzugpp",
@@ -87,12 +91,14 @@ export class UeberzugLayer {
     gapMs = 2,
     watchMs = 200,
     onDeath = null,
+    noCache = false,
   } = {}) {
     this.output = output;
     this.bin = bin;
     this.spacingMs = spacingMs ?? ueberzugSpacing(output, STD.getenviron());
     this.gapMs = gapMs;
     this.watchMs = watchMs;
+    this.noCache = noCache;
     this.onDeath = onDeath;
     this.pid = null;
     this.file = null;
@@ -123,7 +129,10 @@ export class UeberzugLayer {
     try {
       // stdout/stderr -> /dev/null: ueberzugpp must never write into the
       // terminal (fd >= 3, incl. our pipe's write end, is closed in the child)
-      this.pid = OS.exec([this.bin, "layer", "--silent", "-o", this.output], {
+      this.pid = OS.exec([
+        this.bin, "layer", "--silent", ...(this.noCache ? ["--no-cache"] : []),
+        "-o", this.output,
+      ], {
         block: false,
         usePath: true,
         stdin: readFd,

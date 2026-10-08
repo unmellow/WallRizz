@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Grid view + Überzug++ crash handling, end to end, in a pty.
 
-Runs the real WallRizz binary with -P ueberzug against tests/mock-ueberzugpp:
+Runs the real WallRizz binary with -P ueberzug against tests/mock-ueberzugpp
+(per-tile overlays, WALLRIZZ_UEBERZUG_OVERLAY=tile; page mode is covered by
+gallery-pages.test.py):
   1. instance 1 is SIGKILLed by this test in the middle of page 1
   2. instances 2 and 3 abort (SIGABRT) after a few commands (MOCK_UZ_DIE_AFTER)
 and checks that WallRizz
@@ -34,7 +36,8 @@ log, times, pids = f"{work}/uz.log", f"{work}/uz.times", f"{work}/uz.pids"
 SPACING = 40
 NOTICE = b"using text symbols"
 env = dict(os.environ, HOME=home, PATH=f"{bindir}:{os.environ['PATH']}", TERM="xterm-256color",
-           WALLRIZZ_UEBERZUG_OUTPUT="wayland", WALLRIZZ_UEBERZUG_SPACING_MS=str(SPACING),
+           WALLRIZZ_UEBERZUG_OUTPUT="wayland", WALLRIZZ_UEBERZUG_OVERLAY="tile",
+           WALLRIZZ_UEBERZUG_SPACING_MS=str(SPACING),
            MOCK_UZ_LOG=log, MOCK_UZ_TIMES=times, MOCK_UZ_PIDS=pids,
            MOCK_UZ_DIE_AFTER="4", MOCK_UZ_DIE_SKIP="1", CHAFA_ARGV_LOG=chafa_log)
 for k in ("DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM", "MOCK_CHAFA_OLD"):

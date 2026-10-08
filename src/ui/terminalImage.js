@@ -3,6 +3,7 @@
  * Pure detection logic lives in ./imageProtocol.js.
  */
 import { OS, STD, SystemError } from "../core/constants.js";
+import { CACHE_DIR } from "../core/cachePaths.js";
 import { Process, ProcessSync } from "../../qjs-ext-lib/src/process.js";
 import {
   chafaArgs,
@@ -51,12 +52,34 @@ export function queryDA1() {
  * DA1 query as sentinel so terminals that ignore CSI 16 t don't stall us.
  * @returns {string|null} "WxH" or null
  */
+/**
+ * Cell size "WxH" from the terminal's replies: CSI 16 t (cell size), else
+ * CSI 14 t (text area in pixels) divided by the grid size. Alacritty only
+ * answers 14 t; without it WallRizz assumed 10x20 cells, so images were
+ * fitted (and Überzug++ composites sized) for the wrong cell aspect.
+ * @param {string} reply - replies with ESC stripped ("[6;H;Wt[4;H;Wt[?..c")
+ * @param {number[]} [winSize] - [columns, rows]
+ * @returns {string|null}
+ */
+export function cellSizeFromReplies(reply, winSize) {
+  const cell = /\[6;(\d+);(\d+)t/.exec(reply);
+  if (cell && Number(cell[1]) > 0 && Number(cell[2]) > 0) return `${cell[2]}x${cell[1]}`;
+  const area = /\[4;(\d+);(\d+)t/.exec(reply);
+  const [cols, rows] = winSize ?? [];
+  if (area && cols > 0 && rows > 0) {
+    const w = Math.floor(Number(area[2]) / cols);
+    const h = Math.floor(Number(area[1]) / rows);
+    if (w >= 2 && h >= 2 && w <= 200 && h <= 400) return `${w}x${h}`;
+  }
+  return null;
+}
+
 export function queryCellSize() {
   const script = [
     "exec 3<>/dev/tty || exit 1",
     'old=$(stty -g <&3) || exit 1',
     "stty raw -echo min 0 time 5 <&3",
-    "printf '\\033[16t\\033[c' >&3",
+    "printf '\\033[16t\\033[14t\\033[c' >&3",
     'resp=""',
     'while IFS= read -r -s -n1 -t 0.5 ch <&3; do resp+="$ch"; [[ $ch == c ]] && break; done',
     'stty "$old" <&3',
@@ -68,8 +91,7 @@ export function queryCellSize() {
       passStdout: false,
     });
     p.run();
-    const m = /\[6;(\d+);(\d+)t/.exec(p.stdout || "");
-    return m ? `${m[2]}x${m[1]}` : null;
+    return cellSizeFromReplies(p.stdout || "", OS.ttyGetWinSize());
   } catch {
     return null;
   }
@@ -88,7 +110,7 @@ export function chafaFeatures() {
   const [st] = OS.stat(bin);
   // bump the schema when parseChafaFeatures() learns a new field
   const stamp = `v2|${bin}|${st?.mtime}|${st?.size}`;
-  const cacheFile = `${STD.getenv("HOME")}/.cache/WallRizz/chafa-features.json`;
+  const cacheFile = `${CACHE_DIR}chafa-features.json`;
   try {
     const cached = JSON.parse(STD.loadFile(cacheFile) ?? "null");
     if (cached?.stamp === stamp) return (features = cached.features);

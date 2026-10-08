@@ -67,9 +67,14 @@ Every image (all protocols except `kitty`) is fitted into its tile inside the se
 
 Thumbnails are made off the UI thread. The grid opens at once with an empty frame per tile; a small pool of worker threads (`-x/--plimit`, default min(4, CPUs)) runs ImageMagick in batches of up to three images, decoding JPEGs at about twice the thumbnail size (`jpeg:size`), and each tile fills in as soon as its thumbnail is ready. The visible page always comes first; the next and then the previous page are made afterwards, at low priority, so flipping to them is instant. Every page draw takes a ticket: work queued for a page you already left is dropped, and a result that arrives late is never drawn. Never more than `-x` ImageMagick processes run at once (thumbnails, iTerm2 tile JPEGs, fullscreen and colour extraction share the cap). Thumbnails are written to a temp name and renamed into place, and quitting (q, Ctrl+C, SIGTERM) kills the running ImageMagick processes and removes their temp files. In the grid, colours and theme files are generated for a wallpaper when you select it (and in the background for the pages you've seen), instead of for every wallpaper before the grid opens. The list view still prepares everything first, with the same worker pool.
 
-Speed: tiles are always encoded from the small cached thumbnails (`~/.cache/WallRizz/pic/`), never from the full-size wallpapers. The encoded output is cached in memory and on disk in `~/.cache/WallRizz/tiles/`, keyed by thumbnail, protocol, cell box, cell pixel size (sixel) and encoder options, so going back to a page or relaunching doesn't re-encode. Tiles are encoded in parallel (limited by `-x/--plimit`), drawn as soon as each one is ready, and the next page is encoded in the background. The grid stays responsive while a page is still loading. Fullscreen still uses the full-size wallpaper. Delete `~/.cache/WallRizz/tiles/` to reclaim the disk space.
+Speed: tiles are always encoded from the small cached thumbnails (`~/.cache/WallRizz/pic/`, or under `$XDG_CACHE_HOME`), never from the full-size wallpapers. The encoded output is cached in memory and on disk in `~/.cache/WallRizz/tiles/`, keyed by thumbnail, protocol, cell box, cell pixel size (sixel) and encoder options, so going back to a page or relaunching doesn't re-encode. Tiles are encoded in parallel (limited by `-x/--plimit`), drawn as soon as each one is ready, and the next page is encoded in the background. The grid stays responsive while a page is still loading. Fullscreen still uses the full-size wallpaper. Old cache entries are cleaned up automatically (see [Cache](#cache)).
 
-`ueberzug` doesn't draw in the terminal at all. WallRizz starts one `ueberzugpp layer --silent -o x11|wayland` and sends it JSON commands on a pipe, the same way yazi does (`{"action":"add","identifier":...,"x":..,"y":..,"max_width":..,"max_height":..,"path":<thumbnail>}` and `{"action":"remove",...}`). Überzug++ shows each thumbnail in its own window placed over the terminal cells, so Alacritty or any other terminal on X11 or a supported Wayland compositor shows real images. Each tile is sent with its fitted cell box and `"scaler":"fit_contain"`. Overlay identifiers are unique per draw (`wallrizz-p<page>-g<generation>-<tile>`), so a late remove can never hit a newer image. All overlays are removed before a page change, when fullscreen is toggled, on zoom/pan, on terminal resize (they're put back once it settles) and on exit, including Ctrl+C, SIGTERM and SIGHUP. `ueberzugpp` is stopped on exit. It also exits by itself when WallRizz dies, because its stdin pipe closes. In the list view the preview command sends `ueberzugpp cmd -s <socket> -a add ...` to the same process, over fzf's preview window.
+`ueberzug` doesn't draw in the terminal at all. WallRizz starts one long-lived `ueberzugpp layer --silent -o x11|wayland` and sends it JSON commands on a pipe, the same way yazi does (`{"action":"add","identifier":...,"x":..,"y":..,"max_width":..,"max_height":..,"path":...,"scaler":"fit_contain"}` and `{"action":"remove",...}`). Überzug++ shows each image in its own window placed over the terminal cells, so Alacritty or any other terminal on X11 or a supported Wayland compositor shows real images. How the grid is drawn depends on the output:
+
+- **Wayland: one overlay per page.** The visible page's thumbnails are drawn into one page-sized transparent PNG (on the worker pool), each at exactly the pixel position and size the per-tile path would use, and the page is a single `add`. The gaps are transparent, so the selection frame (terminal text) shows through, and moving the selection never touches the overlay. Finished composites are cached in `~/.cache/WallRizz/composites/`, keyed by the thumbnails on the page and the layout (grid, cell pixel size, tile size), and the next and previous page are composited in the background, so a page you've seen comes back as one cached `add`. A cold page fills in progressively: as thumbnails finish, a fuller composite is shown at most every 150 ms (`WALLRIZZ_UEBERZUG_SPACING_MS`), each one a new file under a new identifier, added on top of the previous overlay, which is removed 300 ms later (re-adding the same identifier makes Überzug++ close the old window before the new one is mapped, which blinks). These partial composites live in `/dev/shm/wallrizz-$UID/` (else `$XDG_RUNTIME_DIR/wallrizz/`, else the cache dir), are deleted once replaced, on page change and on exit, and don't count towards the cache; only the complete page is cached. Page keys are debounced: the page you stop on is drawn 70 ms after the last page key (`WALLRIZZ_UEBERZUG_DEBOUNCE_MS`), so fast paging never draws, or composites, the pages in between. The old page's overlay stays up until the new page's cached composite has been added (Überzug++ runs its commands one at a time, and removing a full-page window first would delay the new page by ~100 ms); if the new page isn't cached yet, or another page key comes first, it is removed at once. Überzug++ is started with `--no-cache`, so it doesn't keep its own resized copies of every composite in `~/.cache/ueberzugpp`.
+- **X11: one overlay per tile.** X11 windows have no alpha channel (a transparent PNG shows black), so a page composite would hide the selection frame. Each tile is sent with its fitted cell box, adds are paced (`WALLRIZZ_UEBERZUG_SPACING_MS`, 5 ms on X11), and queued adds of a page you already left are dropped. `WALLRIZZ_UEBERZUG_OVERLAY=page|tile` overrides the choice.
+
+Overlay identifiers are unique per draw (`wallrizz-p<page>-g<generation>-...`), so a late remove can never hit a newer image. All overlays are removed when fullscreen is toggled, on zoom/pan, on terminal resize (they're put back once it settles) and on exit, including Ctrl+C, SIGTERM and SIGHUP. If `ueberzugpp` dies, WallRizz restarts it and redraws the page, twice per session; after a third death it switches to `symbols` with a one-line notice. `ueberzugpp` is stopped on exit. It also exits by itself when WallRizz dies, because its stdin pipe closes. In the list view the preview command sends `ueberzugpp cmd -s <socket> -a add ...` to the same process, over fzf's preview window.
 
 The list view runs `WallRizz --render-tile` as fzf's preview command, which uses the same cache. It relies on fzf passing sixel/iTerm2 output from the preview command through to the terminal (fzf >= 0.44; WallRizz already needs >= 0.63 for its footer).
 
@@ -79,6 +84,36 @@ Override the detection with a flag or an environment variable (the flag wins):
 WallRizz --image-protocol sixel        # or -P sixel; one of auto, kitty, iterm, sixel, symbols, ueberzug
 WALLRIZZ_IMAGE_PROTOCOL=iterm WallRizz
 WallRizz --which-image-protocol        # print what was detected and why, then exit
+```
+
+# Cache
+
+WallRizz keeps its cache in `$XDG_CACHE_HOME/WallRizz/` if `XDG_CACHE_HOME` is set (an absolute path), otherwise `~/.cache/WallRizz/`. Everything uses the same directory: thumbnails (`pic/`), encoded tiles (`tiles/`), Überzug++ page composites (`composites/`), colours (`colours.json`) and theme files (`themes/`).
+
+**Automatic cleanup.** After the first page is drawn, a background worker tidies the cache (it never delays the grid):
+
+- thumbnails, encoded tiles, composites and theme/colour entries of a wallpaper that changed (same path, new modification time or size) are deleted;
+- entries of wallpapers in folders you didn't scan this time are kept, unless their source file no longer exists (`sources.json` remembers where each thumbnail came from);
+- old-format thumbnail names and the old `tiles/v1/` cache are deleted;
+- the image caches (`pic/`, `tiles/`, `composites/`) are capped at 1024 MB by default: the least recently used files go first, never one used by the current run. A thumbnail of a 4K wallpaper is ~0.3 MB, so that's roughly 2,000 wallpapers with their composites and tiles for a couple of grid layouts. Change it with `--cache-max MB` or `WALLRIZZ_CACHE_MAX_MB` (`0` = no cap);
+- temp files of a running WallRizz are never touched; nothing outside the cache directory is ever deleted, and the cleanup refuses to run if the cache path is empty, relative, `/`, your home directory or resolves to one of them through a symlink.
+
+**Clearing it by hand:**
+
+```sh
+WallRizz --clear-thumbnails   # delete pic/, tiles/, composites/ (colours and theme files stay)
+WallRizz --clear-cache        # delete the whole cache directory
+```
+
+Both print what was removed and how much space was freed, then exit with status 0 without opening the picker, e.g.
+
+```
+Removed the image caches (thumbnails, tiles, composites) in /home/me/.cache/WallRizz/:
+  composites/      24 files    41.2 MB
+  pic/            212 files    61.7 MB
+  tiles/          180 files     9.3 MB
+Freed 112.2 MB (416 files).
+Colours and theme files were kept.
 ```
 
 # Gallery

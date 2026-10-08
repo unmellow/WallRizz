@@ -41,11 +41,14 @@ test: quickjs/qjs src/WallRizz
 	quickjs/qjs --std --module tests/ueberzug.test.js tests/mock-ueberzugpp /tmp/wallrizz-ueberzug-test.log
 	python3 tests/gallery-resize.test.py src/WallRizz tests/mock-ueberzugpp /tmp/wallrizz-resize-test
 	cd src && ../quickjs/qjs --std --module ../tests/thumbnails.test.js $(abspath tests/mock-magick-slow) /tmp/wallrizz-thumbnails-test
+	quickjs/qjs --std --module tests/cache.test.js /tmp/wallrizz-cache-test
 	@if command -v chafa >/dev/null; then \
 		tests/probe.test.sh src/WallRizz /tmp/wallrizz-probe-test && \
 		python3 tests/gallery-ueberzug.test.py src/WallRizz tests/mock-ueberzugpp /tmp/wallrizz-gallery-test && \
-		python3 tests/gallery-thumbs.test.py src/WallRizz tests/mock-magick-slow /tmp/wallrizz-thumbs-test; \
-	else echo "probe / gallery-ueberzug / gallery-thumbs tests skipped: chafa not installed"; fi
+		python3 tests/gallery-thumbs.test.py src/WallRizz tests/mock-magick-slow /tmp/wallrizz-thumbs-test && \
+		python3 tests/gallery-pages.test.py src/WallRizz tests/mock-ueberzugpp tests/mock-magick-slow /tmp/wallrizz-pages-test && \
+		python3 tests/cache-flags.test.py src/WallRizz /tmp/wallrizz-cacheflags-test; \
+	else echo "probe / gallery-ueberzug / gallery-thumbs / gallery-pages / cache-flags tests skipped: chafa not installed"; fi
 
 install: src/WallRizz
 	install -Dm755 src/WallRizz "$(DESTDIR)$(BINDIR)/WallRizz"

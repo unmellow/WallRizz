@@ -1,4 +1,5 @@
-import { SystemError, HOME_DIR, OS } from "../core/constants.js";
+import { SystemError, OS } from "../core/constants.js";
+import { PIC_DIR } from "../core/cachePaths.js";
 import { ensureDir } from "../core/utils/io.js";
 import { log } from "../core/utils/ui.js";
 import { defaultPoolSize, ThumbPool } from "./thumbnails.js";
@@ -12,7 +13,7 @@ export class CacheManager {
   constructor(config, wallpapers) {
     this.config = config;
     this.wallpapers = wallpapers;
-    this.picCacheDir = HOME_DIR.concat("/.cache/WallRizz/pic/");
+    this.picCacheDir = PIC_DIR;
     ensureDir(this.picCacheDir);
   }
 

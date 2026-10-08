@@ -5,12 +5,18 @@ import { notify, log } from "../core/utils/ui.js";
 import { ensureDir } from "../core/utils/io.js";
 import { CacheManager } from "./CacheManager.js";
 import { scanWallpapers } from "./scan.js";
-import { defaultPoolSize, magickSlots, thumbName } from "./thumbnails.js";
+import { defaultPoolSize, magickSlots, startCacheCleanup, thumbName } from "./thumbnails.js";
+import { formatBytes } from "./cacheCleanup.js";
+import { CACHE_DIR } from "../core/cachePaths.js";
 import { OS, STD, HOME_DIR, EXIT, SystemError } from "../core/constants.js";
 
 export default class WallpaperManager {
   constructor(config) {
     this.config = config;
+    // files used from now on are this run's: the size cap never takes them
+    // (a few seconds of slack for coarse timestamps)
+    this.runStart = Date.now() - 5000;
+    this.sources = [];
     this.wallpapers = this.loadWallpapers();
     this.cacheManager = new CacheManager(this.config, this.wallpapers);
     this.themeManager = new Theme(
@@ -31,15 +37,57 @@ export default class WallpaperManager {
     // the headless setters still need every thumbnail and theme up front.
     if (this.showsGrid()) {
       this.themeManager.loadThemeExtensionScripts();
-      await this.handleSettingWallpaper((idle) =>
-        this.themeManager.fillRemaining(this.wallpapers, idle)
-      );
+      try {
+        // after the first page is on screen: the cache cleanup, then the
+        // colours/themes nobody asked for yet
+        await this.handleSettingWallpaper((idle) => {
+          this.startCacheCleanup();
+          return this.themeManager.fillRemaining(this.wallpapers, idle);
+        });
+      } finally {
+        this.cleanup?.stop();
+      }
       return;
     }
+    this.startCacheCleanup();
     await this.cacheManager.handleWallpaperCacheCreation();
     await this.themeManager.init();
     await this.handleSettingRandomWallpaper();
     await this.handleSettingWallpaper();
+  }
+
+  /**
+   * Startup cache cleanup (cacheCleanup.js) in a worker thread: stale,
+   * orphaned and legacy cache files, then the size cap (--cache-max). It
+   * never blocks drawing; quitting doesn't wait for it.
+   */
+  startCacheCleanup() {
+    if (this.cleanup) return;
+    const env = STD.getenviron();
+    const mb = Number(this.config.cacheMax ?? 1024);
+    this.cleanup = startCacheCleanup({
+      root: CACHE_DIR,
+      current: this.sources,
+      capBytes: mb > 0 ? mb * 1024 * 1024 : 0,
+      runStart: this.runStart,
+      pid: OS.getpid?.() ?? 0,
+      env: { HOME: env.HOME, XDG_CACHE_HOME: env.XDG_CACHE_HOME },
+    });
+    this.cleanup.done.then((report) => {
+      if (!report) return;
+      if (!report.ok) {
+        log(`Cache cleanup skipped: ${report.why}`, this.config);
+        return;
+      }
+      if (report.colourKeys?.length) this.themeManager.pruneColours(report.colourKeys);
+      if (report.removed.length) {
+        log(
+          `Cache cleanup: removed ${report.removed.length} file(s), ${formatBytes(report.freed)}; ` +
+            `image caches now ${formatBytes(report.imageBytes)}`,
+          this.config,
+        );
+      }
+    }).catch(() => {});
   }
 
   /** The interactive grid (not the fzf list, not a headless setter). */
@@ -61,11 +109,17 @@ export default class WallpaperManager {
     }
     // The id is the thumbnail's file name: path + mtime + size (+ thumbnail
     // size), so an edited wallpaper gets a new thumbnail, palette and theme
-    // (the old dev+inode name kept stale ones forever). Old cache files are
-    // left alone; they simply aren't used any more.
+    // (the old dev+inode name kept stale ones forever). Stale and legacy
+    // cache files are removed by the startup cleanup.
     const wallpapers = found.map(({ name, dev, ino }) => {
       const path = this.config.wallpapersDirectory.concat(name);
       const [st, err] = OS.stat(path);
+      if (err === 0) {
+        this.sources.push({
+          id: thumbName(path, st, this.config.thumbnailSize).replace(/\.png$/, ""),
+          path,
+        });
+      }
       return {
         name,
         uniqueId: err === 0

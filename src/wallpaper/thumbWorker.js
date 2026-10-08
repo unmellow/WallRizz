@@ -7,8 +7,13 @@
  * the temp file is renamed into place only when magick succeeded. A
  * killed magick leaves no thumbnail behind, only its temp file, which is
  * removed here (or by the pool on shutdown).
+ *
+ * Also: "composite" (an Überzug++ page composite, one magick, same temp +
+ * rename) and "cleanup" (the startup cache cleanup, see cacheCleanup.js;
+ * no magick, so no magick slot).
  */
 import * as os from "os";
+import { cleanupCache } from "./cacheCleanup.js";
 
 const parent = os.Worker.parent;
 const devNull = os.open("/dev/null", os.O_RDWR);
@@ -52,11 +57,66 @@ export const magickArgs = (items, jpegSize) => {
   return args;
 };
 
+/**
+ * One page composite: a transparent canvas with every thumbnail resized to
+ * its pixel box and placed at its offset (see ui/pageComposite.js). Fast
+ * PNG settings: written once per page and layout, read once by ueberzugpp.
+ */
+export const compositeArgs = (spec, tmp) => {
+  // a partial composite builds on the previous one (only the new tiles are
+  // decoded and drawn); otherwise a transparent canvas
+  const args = spec.base
+    ? ["magick", "-limit", "thread", "1", "-define", "filename:literal=true", spec.base]
+    : [
+      "magick", "-limit", "thread", "1",
+      "-size", `${spec.width}x${spec.height}`, "xc:none",
+      "-define", "filename:literal=true",
+    ];
+  args.push("-filter", "Triangle");
+  for (const it of spec.items) {
+    args.push(
+      "(", it.src, "-resize", `${it.w}x${it.h}!`, ")",
+      "-geometry", `+${it.x}+${it.y}`, "-composite",
+    );
+  }
+  args.push(
+    "-define", "png:compression-level=1",
+    "-define", "png:compression-filter=0",
+    "-define", "png:compression-strategy=2",
+    `PNG32:${tmp}`,
+  );
+  return args;
+};
+
+const finishItem = (code, tmp, dest) => {
+  let ok = false;
+  const [st, err] = os.stat(tmp);
+  if (code === 0 && err === 0 && st.size > 0) ok = os.rename(tmp, dest) === 0;
+  if (!ok) os.remove(tmp);
+  return { dest, ok };
+};
+
 parent.onmessage = (e) => {
   const msg = e.data;
   if (!msg) return;
   if (msg.type === "stop") {
     parent.onmessage = null; // lets this thread end
+    return;
+  }
+  if (msg.type === "cleanup") {
+    let report;
+    try {
+      report = cleanupCache(msg.options);
+    } catch (err) {
+      report = { ok: false, why: String(err), removed: [], freed: 0, colourKeys: [] };
+    }
+    parent.postMessage({ type: "cleaned", report });
+    parent.onmessage = null; // one job per cleanup thread
+    return;
+  }
+  if (msg.type === "composite") {
+    const code = run(compositeArgs(msg.spec, msg.tmp));
+    parent.postMessage({ type: "done", results: [finishItem(code, msg.tmp, msg.dest)] });
     return;
   }
   if (msg.type !== "batch") return;

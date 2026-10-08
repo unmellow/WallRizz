@@ -43,6 +43,9 @@ export function parseArguments() {
     imageProtocol: "--image-protocol",
     whichImageProtocol: "--which-image-protocol",
     renderTile: "--render-tile",
+    cacheMax: "--cache-max",
+    clearCache: "--clear-cache",
+    clearThumbnails: "--clear-thumbnails",
   };
 
   // Define and parse command-line arguments using the 'arg' library
@@ -186,6 +189,24 @@ export function parseArguments() {
         .val("THUMBNAIL")
         .desc(
           "Internal (list view preview): print the cached encoded preview of a thumbnail sized to $FZF_PREVIEW_COLUMNS x $FZF_PREVIEW_LINES.",
+        ),
+      [argNames.cacheMax]: arg
+        .num(1024)
+        .min(0)
+        .env("WALLRIZZ_CACHE_MAX_MB")
+        .val("MB")
+        .desc(
+          "Size cap of the image caches (thumbnails, tiles, Überzug++ page composites). Checked in the background at startup; the oldest files go first. 0 = no cap. (default: 1024)",
+        ),
+      [argNames.clearCache]: arg
+        .flag(false)
+        .desc(
+          "Delete the whole cache ($XDG_CACHE_HOME/WallRizz, default ~/.cache/WallRizz), print what was removed and exit.",
+        ),
+      [argNames.clearThumbnails]: arg
+        .flag(false)
+        .desc(
+          "Delete only the image caches (thumbnails, tiles, composites), keep colours and themes, print what was removed and exit.",
         ),
       "-d": argNames.wallpapersDirectory,
       "-r": argNames.setRandomWallpaper,

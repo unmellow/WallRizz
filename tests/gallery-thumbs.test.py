@@ -10,7 +10,8 @@ takes ~1s per image).
   4. after the next page was prefetched, flipping to it is quick
   5. paging through 5 pages quickly: the final page's image is drawn, no
      earlier page's image is drawn after it
-  6. cache key: a new mtime gets a new thumbnail; a run with nothing
+  6. cache key: a new mtime gets a new thumbnail (the stale one is cleaned
+     up at startup); a run with nothing
      changed launches no magick at all
   7. q, Ctrl+C, SIGTERM mid-generation: WallRizz exits, no magick left
      running, no temp (half-written) file left
@@ -284,7 +285,13 @@ check("cache key: new mtime and new size give new thumbnails",
 redone = sorted(n for b in batches()[0] for n in b[3])
 check("cache key: only the changed wallpapers are regenerated", redone == ["w00.jpg", "w01.jpg"],
       str(redone))
-check("cache key: the old thumbnails are left alone", first <= set(os.listdir(pic)))
+# the startup cache cleanup (in the background) removes the two stale
+# thumbnails of the changed wallpapers and keeps the six others
+stale = {n for n in first if n[:3] in ("w00", "w01")}
+term.wait_for("stale thumbnails cleaned up", lambda: not (stale & set(os.listdir(pic))), sec=30)
+check("cache key: stale thumbnails cleaned up, the others kept",
+      not (stale & set(os.listdir(pic))) and (first - stale) <= set(os.listdir(pic)),
+      str(sorted(set(os.listdir(pic)))))
 quit(term, "cache: changed")
 term = spawn(100, 32, plimit="4")
 term.wait_for("the cached page", lambda: term.out.count(b"\x1b[0m") >= 8, sec=10)

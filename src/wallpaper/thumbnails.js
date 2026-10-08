@@ -21,13 +21,21 @@
  * colour extraction) takes a slot of `magickSlots`, whose cap is -x, so no
  * more than -x run at once.
  *
+ * The same workers also make the Überzug++ page composites (composite():
+ * one magick per composite, high lane at the front so the visible page
+ * never waits behind thumbnails; prefetched neighbours on the low lane; a
+ * partial composite can build on the previous one, `base`), and
+ * startCacheCleanup() runs the startup cache cleanup (cacheCleanup.js) on a
+ * worker of its own, after the first page.
+ *
  * Writes go to a temp name and are renamed into place, so a killed process
  * never leaves a half-written thumbnail.
  */
-import { OS, STD, HOME_DIR } from "../core/constants.js";
+import { OS, STD } from "../core/constants.js";
+import { COMPOSITE_DIR, PIC_DIR } from "../core/cachePaths.js";
 import { ensureDir } from "../core/utils/io.js";
 
-export const PIC_CACHE_DIR = HOME_DIR + "/.cache/WallRizz/pic/";
+export const PIC_CACHE_DIR = PIC_DIR;
 // images per magick invocation (measured on 4K JPEGs: batches of 3 beat
 // one process per image by ~10-15%; bigger batches make a stale batch, which
 // a page flip has to wait for, take longer)
@@ -154,7 +162,7 @@ export class ThumbPool {
     this.busy = new Map(); // worker -> batch (entries)
     this.pids = new Map(); // worker -> pid of its running magick
     this.entries = new Map(); // dest -> entry (queued or running)
-    this.stats = { batches: 0, images: 0, stale: 0 };
+    this.stats = { batches: 0, images: 0, stale: 0, composites: 0 };
     this.stopped = false;
     this.pumpTimer = null;
     this.onFree = () => this.pump();
@@ -215,6 +223,52 @@ export class ThumbPool {
     });
   }
 
+  /**
+   * Make sure the Überzug++ page composite `spec.dest` exists (see
+   * ui/pageComposite.js). Same queue, lanes, tickets and magick cap as the
+   * thumbnails; a composite is one magick on its own. A finished full
+   * composite is cached: the list of thumbnail ids it was made from is
+   * written next to it (<name>.txt) for the cache cleanup.
+   * @param {{dest: string, width: number, height: number, items: Array,
+   *   partial?: boolean}} spec
+   * @returns {Promise<string|null>} the composite path, null if dropped,
+   *   stale or failed
+   */
+  composite(spec, generation, { low = false } = {}) {
+    if (this.stopped || !spec.items.length) return Promise.resolve(null);
+    const dest = spec.dest;
+    if (OS.stat(dest)[1] === 0) return Promise.resolve(dest);
+    return new Promise((resolve) => {
+      const e = this.entries.get(dest);
+      if (e) {
+        e.generation = Math.max(e.generation, generation);
+        e.waiters.push(resolve);
+        if (!low && e.low && !e.running) {
+          this.low.splice(this.low.indexOf(e), 1);
+          e.low = false;
+          this.high.push(e);
+        }
+        return;
+      }
+      ensureDir(COMPOSITE_DIR);
+      if (!spec.partial) {
+        writeSmallAtomic(dest.replace(/\.png$/, ".txt"), spec.items.map((t) => t.id).join("\n") + "\n");
+      }
+      const entry = { kind: "composite", spec, dest, generation, low, waiters: [resolve], running: false };
+      this.entries.set(dest, entry);
+      // the visible page's composite is what the user is waiting for: it
+      // goes before the thumbnails still queued (prefetch ones go last)
+      if (low) this.low.push(entry);
+      else this.high.unshift(entry);
+      if (!this.pumpTimer) {
+        this.pumpTimer = OS.setTimeout(() => {
+          this.pumpTimer = null;
+          this.pump();
+        }, 0);
+      }
+    });
+  }
+
   /** Requests still queued or running (any ticket). */
   get pending() {
     return this.entries.size;
@@ -226,13 +280,35 @@ export class ThumbPool {
     while (this.idle.length && (this.high.length || this.low.length)) {
       if (!magickSlots.tryAcquire()) return; // freed slots call pump again
       const lane = this.high.length ? this.high : this.low;
-      const batch = lane.splice(0, THUMB_BATCH);
+      // a composite runs alone; thumbnails go in batches (up to the next
+      // composite in the lane)
+      let n = 1;
+      if (lane[0].kind !== "composite") {
+        while (n < THUMB_BATCH && n < lane.length && lane[n].kind !== "composite") n++;
+      }
+      const batch = lane.splice(0, n);
       const worker = this.idle.pop();
       this.busy.set(worker, batch);
       const { w, h } = parseSize(this.size);
       for (const e of batch) {
         e.running = true;
         e.tmp = `${e.dest}.${worker.tag}.tmp`;
+      }
+      if (batch[0].kind === "composite") {
+        const e = batch[0];
+        this.stats.composites++;
+        worker.postMessage({
+          type: "composite",
+          spec: {
+            width: e.spec.width,
+            height: e.spec.height,
+            base: e.spec.base ?? null,
+            items: e.spec.draw ?? e.spec.items,
+          },
+          tmp: e.tmp,
+          dest: e.dest,
+        });
+        continue;
       }
       this.stats.batches++;
       worker.postMessage({
@@ -333,6 +409,53 @@ export class ThumbPool {
     magickSlots.listeners.delete(this.onFree);
     livePools.delete(this);
   }
+}
+
+/** small file, written to a temp name (with our pid) and renamed */
+function writeSmallAtomic(path, content) {
+  const tmp = `${path}.${OS.getpid?.() ?? 0}-${Date.now()}.tmp`;
+  const f = STD.open(tmp, "w");
+  if (!f) return false;
+  f.puts(content);
+  f.close();
+  if (OS.rename(tmp, path) === 0) return true;
+  OS.remove(tmp);
+  return false;
+}
+
+/**
+ * Startup cache cleanup in a worker thread of its own (same worker
+ * module as the pool; no magick, so no magick slot). It never blocks the
+ * UI; quitting doesn't wait for it.
+ * @param {object} options - see cleanupCache() in cacheCleanup.js
+ * @returns {{done: Promise<object|null>, stop: () => void}}
+ */
+export function startCacheCleanup(options) {
+  let worker = null;
+  let finish = null;
+  const done = new Promise((resolve) => (finish = resolve));
+  try {
+    worker = new OS.Worker("wallpaper/thumbWorker.js");
+  } catch {
+    finish(null);
+    return { done, stop: () => {} };
+  }
+  worker.onmessage = (e) => {
+    if (e.data?.type !== "cleaned") return;
+    worker.onmessage = null;
+    finish(e.data.report);
+  };
+  worker.postMessage({ type: "cleanup", options });
+  return {
+    done,
+    // the event loop stops waiting for it (the thread ends with the process)
+    stop: () => {
+      if (worker.onmessage) {
+        worker.onmessage = null;
+        finish(null);
+      }
+    },
+  };
 }
 
 /**

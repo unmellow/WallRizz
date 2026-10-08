@@ -4,6 +4,7 @@ import { promiseQueueWithLimit } from "../core/utils/async.js";
 import workerPromise from "../extensions/ExtensionHandler.js";
 import { OS, STD, HOME_DIR, SystemError, execAsync, Color } from "../core/constants.js";
 import { magickSlots, makeThumbnail } from "../wallpaper/thumbnails.js";
+import { COLOURS_FILE, THEMES_DIR } from "../core/cachePaths.js";
 
 /**
  * @typedef {import('../core/types.d.ts').ColoursCache} ColoursCache
@@ -23,7 +24,7 @@ class Theme {
     this.wallpaperDir = wallpaperDir;
     this.wallpaper = wallpaper;
     this.config = config;
-    this.wallpaperThemeCacheDir = `${HOME_DIR}/.cache/WallRizz/themes/`;
+    this.wallpaperThemeCacheDir = THEMES_DIR;
     this.appThemeCacheDir = {};
     this.themeExtensionScriptsBaseDir =
       `${HOME_DIR}/.config/WallRizz/themeExtensionScripts/`;
@@ -40,8 +41,7 @@ class Theme {
     await this.createAppThemesFromColours();
   }
 
-  static wallpaperColoursCacheFilePath =
-    `${HOME_DIR}/.cache/WallRizz/colours.json`; // Made static to share it with UI class
+  static wallpaperColoursCacheFilePath = COLOURS_FILE; // Made static to share it with UI class
 
   async createColoursCacheFromWallpapers() {
     const queue = this.wallpaper
@@ -282,6 +282,24 @@ class Theme {
       stopped = true;
       if (timer) OS.clearTimeout(timer);
     };
+  }
+
+  /**
+   * Drop colour cache entries the startup cleanup found stale, orphaned or
+   * legacy (the main thread owns colours.json, so it rewrites it).
+   */
+  pruneColours(keys) {
+    this.getCachedColours("\0load"); // (re)loads the file
+    let changed = false;
+    for (const key of keys) {
+      if (key in Theme.coloursCache) {
+        delete Theme.coloursCache[key];
+        changed = true;
+      }
+    }
+    if (changed) {
+      writeFile(JSON.stringify(Theme.coloursCache), Theme.wallpaperColoursCacheFilePath);
+    }
   }
 
   getCachedColours(cacheName) {

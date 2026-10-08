@@ -2,6 +2,7 @@ import { Curl } from "../../qjs-ext-lib/src/curl.js";
 import { ensureDir, writeFile } from "../core/utils/io.js";
 import { notify } from "../core/utils/ui.js";
 import { HOME_DIR, STD, SystemError, execAsync } from "../core/constants.js";
+import { CACHE_DIR } from "../core/cachePaths.js";
 
 /**
  * @typedef {import('../core/types.d.ts').ApiCache} ApiCache
@@ -22,7 +23,7 @@ export default class Download {
     /** @type {DownloadItemList} */
     this.downloadItemList = [];
 
-    this.apiCacheFilePath = `${HOME_DIR}/.cache/WallRizz/apiCache.json`;
+    this.apiCacheFilePath = `${CACHE_DIR}apiCache.json`;
     ensureDir(this.destinationDir);
     const apiCacheFile = STD.loadFile(this.apiCacheFilePath);
     /** @type {ApiCache} */

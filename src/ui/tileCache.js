@@ -3,7 +3,7 @@
  *
  * - Always encodes from the small cached thumbnail, never the wallpaper.
  * - Caches the encoded output in memory (LRU) and on disk under
- *   ~/.cache/WallRizz/tiles/, keyed by thumbnail id + thumbnail mtime/size +
+ *   <cache>/tiles/v2/ ($XDG_CACHE_HOME or ~/.cache), keyed by thumbnail id + thumbnail mtime/size +
  *   protocol + cell box (+ cell pixel size for sixel) + encoder options +
  *   chafa version, so revisiting a page or relaunching never re-encodes.
  * - Encodes in parallel with a bounded, two-priority queue (visible tiles
@@ -14,12 +14,13 @@
  * made WezTerm slow. Instead the thumbnail is re-encoded once as a JPEG and
  * sent with width/height in cells and preserveAspectRatio=1.
  */
-import { OS, STD, HOME_DIR, execAsync } from "../core/constants.js";
+import { OS, STD, execAsync } from "../core/constants.js";
+import { TILES_DIR } from "../core/cachePaths.js";
 import { magickSlots } from "../wallpaper/thumbnails.js";
 import { ensureDir } from "../core/utils/io.js";
 import { buildChafaArgs, chafaFeatures, renderWithChafaArgs } from "./terminalImage.js";
 
-export const TILE_CACHE_DIR = HOME_DIR + "/.cache/WallRizz/tiles/v1/";
+export const TILE_CACHE_DIR = TILES_DIR;
 const MEMORY_LIMIT = 256;
 const JPEG_QUALITY = 85;
 
@@ -70,8 +71,11 @@ function readBytes(path) {
   return bytes;
 }
 
+// temp names carry our pid: the cache cleanup never removes the temp file
+// of a process that is still running
+const PID = OS.getpid?.() ?? 0;
 function writeAtomic(path, content) {
-  const tmp = `${path}.${Date.now()}${Math.floor(Math.random() * 1e6)}.tmp`;
+  const tmp = `${path}.${PID}-${Date.now()}${Math.floor(Math.random() * 1e6)}.tmp`;
   const f = STD.open(tmp, "w");
   if (!f) return;
   f.puts(content);
@@ -175,16 +179,19 @@ export class TileCache {
     return err === 0 ? `${st.mtime}-${st.size}` : "missing";
   }
 
+  // v2 names: "<thumbnail id>~<rest>", so the cache cleanup can tell which
+  // thumbnail (and so which wallpaper) a tile belongs to ("~" never occurs
+  // in a thumbnail name)
   key(thumbPath, columns, rows) {
     const id = thumbPath.split("/").at(-1).replace(/\.[^.]+$/, "");
     const info = this.thumbInfo(thumbPath);
     if (this.protocol === "iterm") {
       // the JPEG payload is independent of the cell box
       const hash = fnv1a(`${thumbPath}|${info}|${this.encoderId}`);
-      return { mem: `${id}-${hash}`, disk: `${this.dir}${id}-${hash}.b64` };
+      return { mem: `${id}~${hash}`, disk: `${this.dir}${id}~${hash}.b64` };
     }
     const hash = fnv1a(`${thumbPath}|${info}|${this.encoderId}|${columns}x${rows}`);
-    const name = `${id}-${columns}x${rows}-${hash}`;
+    const name = `${id}~${columns}x${rows}-${hash}`;
     return { mem: name, disk: `${this.dir}${name}.out` };
   }
 

@@ -1,4 +1,4 @@
-import { STD, EXIT, SystemError } from "./core/constants.js";
+import { OS, STD, EXIT, SystemError } from "./core/constants.js";
 import { parseArguments } from "./args.js";
 import {
   ThemeExtensionScriptsDownloadManager,
@@ -12,6 +12,8 @@ import { getImageProtocol, imagePixelSize } from "./ui/terminalImage.js";
 import { fitImageInBox, parseCellPx } from "./ui/imageProtocol.js";
 import { stopAllUeberzug } from "./ui/ueberzug.js";
 import { TileCache } from "./ui/tileCache.js";
+import { clearCache, formatBytes } from "./wallpaper/cacheCleanup.js";
+import { CACHE_DIR } from "./core/cachePaths.js";
 
 class WallRizz {
   constructor() {
@@ -22,6 +24,7 @@ class WallRizz {
 
   async run() {
     try {
+      this.handleClearCache();
       await this.handleRenderTile();
       this.handleShowKeymaps();
       this.handleWhichImageProtocol();
@@ -113,6 +116,40 @@ class WallRizz {
       STD.out.flush();
     }
     throw EXIT;
+  }
+
+  // --clear-cache / --clear-thumbnails: remove, report, exit (no picker)
+  handleClearCache() {
+    const { clearCache: all, clearThumbnails } = this.config;
+    if (!all && !clearThumbnails) return;
+    const env = STD.getenviron();
+    const report = clearCache({
+      root: CACHE_DIR,
+      thumbnailsOnly: !all,
+      pid: OS.getpid?.() ?? 0,
+      env: { HOME: env.HOME, XDG_CACHE_HOME: env.XDG_CACHE_HOME },
+    });
+    if (!report.ok) {
+      STD.err.puts(`WallRizz: ${report.why}\n`);
+      STD.exit(1);
+    }
+    const what = all ? "cache" : "image caches (thumbnails, tiles, composites)";
+    if (!report.files) {
+      print(`Nothing to remove: the ${what} in ${CACHE_DIR} ${all ? "is" : "are"} already empty.`);
+    } else {
+      print(`Removed the ${what} in ${CACHE_DIR}:`);
+      const width = Math.max(...report.parts.map((p) => p.name.length));
+      for (const p of report.parts) {
+        const files = `${p.files} file${p.files === 1 ? "" : "s"}`;
+        print(`  ${p.name.padEnd(width)}  ${files.padStart(12)}  ${formatBytes(p.bytes).padStart(9)}`);
+      }
+      print(`Freed ${formatBytes(report.freed)} (${report.files} file${report.files === 1 ? "" : "s"}).`);
+    }
+    if (report.inUse) {
+      print(`Kept ${report.inUse} temp file(s) another running WallRizz is writing.`);
+    }
+    if (!all) print("Colours and theme files were kept.");
+    STD.exit(0);
   }
 
   handleWhichImageProtocol() {
