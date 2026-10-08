@@ -28,7 +28,10 @@ endif
 src/WallRizz: $(SOURCES)
 	cd src && $(abspath $(QJSC)) -flto -D extensions/ExtensionHandlerWorker.js -o WallRizz main.js
 
-test: quickjs/qjsc
+quickjs/qjs:
+	$(MAKE) -C quickjs -j$(JOBS) qjs
+
+test: quickjs/qjs
 	quickjs/qjs --std --module tests/imageProtocol.test.js
 	tests/make-scan-tree.sh /tmp/wallrizz-scan-tree
 	quickjs/qjs --std --module tests/scan.test.js /tmp/wallrizz-scan-tree
