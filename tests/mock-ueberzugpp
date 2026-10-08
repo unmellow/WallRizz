@@ -1,14 +1,40 @@
 #!/usr/bin/env bash
 # Mock Überzug++ for tests: records argv and every stdin line to $MOCK_UZ_LOG.
-# MOCK_UZ_FAIL=1: exit at once (ueberzugpp can't start)
-# MOCK_UZ_HANG=1: ignore SIGTERM and stdin EOF (forces SIGKILL on stop)
+# MOCK_UZ_FAIL=1:        exit at once (ueberzugpp can't start)
+# MOCK_UZ_HANG=1:        ignore SIGTERM and stdin EOF (forces SIGKILL on stop)
+# MOCK_UZ_TIMES=FILE:    also append "<epoch seconds.micro> <action> <id>" per line
+# MOCK_UZ_DIE_AFTER=N:   abort (SIGABRT, like ueberzugpp 2.9.10 on a burst)
+#                        after the N-th command of this instance
+# MOCK_UZ_CLOSE_STDIN=1: close stdin and keep running (writes get EPIPE)
+# MOCK_UZ_DIE_SKIP=N:    the first N instances (counted in the log) don't die
 log=${MOCK_UZ_LOG:-/tmp/mock-ueberzugpp.log}
+instance=$(grep -c '^ARGV' "$log" 2>/dev/null)
 echo "ARGV $*" >> "$log"
+[[ -n $MOCK_UZ_PIDS ]] && echo "$$" >> "$MOCK_UZ_PIDS"
+(( instance < ${MOCK_UZ_DIE_SKIP:-0} )) && MOCK_UZ_DIE_AFTER=
 [[ -n $MOCK_UZ_FAIL ]] && exit 1
 if [[ -n $MOCK_UZ_HANG ]]; then
   trap '' TERM
   while :; do sleep 0.05; done
 fi
+if [[ -n $MOCK_UZ_CLOSE_STDIN ]]; then
+  exec 0<&-
+  sleep 5
+  exit 0
+fi
 trap 'echo "SIGTERM" >> "$log"; exit 0' TERM
-while IFS= read -r line; do echo "CMD $line" >> "$log"; done
+n=0
+while IFS= read -r line; do
+  echo "CMD $line" >> "$log"
+  if [[ -n $MOCK_UZ_TIMES ]]; then
+    [[ $line =~ \"action\":\"([a-z]+)\",\"identifier\":\"([^\"]+)\" ]] &&
+      echo "$EPOCHREALTIME ${BASH_REMATCH[1]} ${BASH_REMATCH[2]}" >> "$MOCK_UZ_TIMES"
+  fi
+  n=$((n + 1))
+  if [[ -n $MOCK_UZ_DIE_AFTER && $n -ge $MOCK_UZ_DIE_AFTER ]]; then
+    echo "ABORT" >> "$log"
+    trap - ABRT
+    kill -ABRT $$
+  fi
+done
 echo "EOF" >> "$log"

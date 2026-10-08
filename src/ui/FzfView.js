@@ -4,11 +4,15 @@ import Fzf from "../../helpers/fzf.js";
 import { Theme } from "../theme/ThemeManager.js";
 import { STD, SystemError, EXIT, OS } from "../core/constants.js";
 import {
+  commandExists,
   getImageProtocol,
   getTerminalBrand,
+  insideKitty,
+  insideWezterm,
   queryCellSize,
   requireChafa,
 } from "./terminalImage.js";
+import { base64Utf8 } from "./imageProtocol.js";
 import { UeberzugLayer } from "./ueberzug.js";
 
 export class FzfView {
@@ -43,8 +47,11 @@ export class FzfView {
         .filter(Boolean),
     );
 
+    // (inside kitty) the original preview: draw at 0;0 straight on the tty.
+    // The base64 path is line 2 of the item minus its trailing space, which
+    // used to end up in the payload.
     const kittyPreviewCmd =
-      "--preview='printf \"\\x1b[0;0H\\x1b_Ga=T,t=f,f=100,q=2,c=${FZF_PREVIEW_COLUMNS};`echo -e {} | head -n 2 | tail -n 1`\\x1b\\\\\" >> /dev/tty'";
+      "--preview='printf \"\\x1b[0;0H\\x1b_Ga=T,t=f,f=100,q=2,c=${FZF_PREVIEW_COLUMNS};$(echo -e {} | head -n 2 | tail -n 1 | tr -d \" \")\\x1b\\\\\" >> /dev/tty'";
 
     let protocol = this.config.resolvedImageProtocol ?? "kitty";
     let ueberzug = null;
@@ -58,10 +65,22 @@ export class FzfView {
         protocol = "symbols";
       }
     }
-    const previewCmd = protocol === "kitty"
+    // fzf only keeps kitty images in the preview when they are drawn with
+    // unicode placeholders (U=1). WezTerm has no placeholder support and fzf's
+    // repaint wipes its cell-grid images (both chafa -f kitty and a direct
+    // a=T,t=f stay blank there), so its list preview uses iTerm2 images,
+    // WezTerm's own default protocol. Other kitty terminals keep the
+    // original preview.
+    const kittyVia = protocol === "kitty" && !insideKitty() &&
+        insideWezterm() && commandExists("chafa")
+      ? "iterm"
+      : null;
+    const previewCmd = kittyVia
+      ? this.chafaPreviewCmd(kittyVia)
+      : protocol === "kitty"
       ? kittyPreviewCmd
       : ueberzug
-      ? this.ueberzugPreviewCmd(ueberzug.socketPath())
+      ? this.ueberzugPreviewCmd(ueberzug)
       : this.chafaPreviewCmd(protocol);
 
     const fzf = new Fzf();
@@ -129,7 +148,7 @@ export class FzfView {
     try {
       previewer.run();
     } catch (error) {
-      ueberzug?.stop();
+      this.stopUeberzug(ueberzug);
       throw new SystemError(
         "Failed to run fzf.",
         "Make sure fzf is installed and available in the system.",
@@ -137,7 +156,7 @@ export class FzfView {
       );
     }
     // fzf is gone (selection, Esc or Ctrl+C): drop the preview overlay
-    ueberzug?.stop();
+    this.stopUeberzug(ueberzug);
 
     if (!previewer.success) {
       STD.exit();
@@ -180,33 +199,47 @@ export class FzfView {
    * through its socket, to show the thumbnail over fzf's preview window
    * (same approach as the lf/fzf ueberzugpp scripts). Re-adding the same
    * identifier replaces the previous image.
+   * Adds are serialized with flock and kept `spacingMs` apart (timestamp
+   * file), like the grid view's queue: fast scrolling must not burst adds
+   * into ueberzugpp's Wayland canvas. If the layer has died (crashed:
+   * `ueberzugpp cmd` still exits 0 then), the preview falls back to chafa
+   * symbols.
    */
-  ueberzugPreviewCmd(socket) {
-    return `--preview='f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d 2>/dev/null | tr -d "\\000"); ueberzugpp cmd -s "${socket}" -i wallrizz-preview -a add -x "$FZF_PREVIEW_LEFT" -y "$FZF_PREVIEW_TOP" --max-width "$FZF_PREVIEW_COLUMNS" --max-height "$FZF_PREVIEW_LINES" -f "$f" >/dev/null 2>&1'`;
+  ueberzugPreviewCmd(layer) {
+    const socket = layer.socketPath();
+    const pid = layer.pid;
+    const spacing = Math.max(0, Math.round(layer.spacingMs));
+    const decode =
+      'f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d 2>/dev/null | tr -d "\\000")';
+    const alive = `st=$(cut -d" " -f3 /proc/${pid}/stat 2>/dev/null); [ -n "$st" ] && [ "$st" != Z ]`;
+    const add = `ueberzugpp cmd -s "${socket}" -i wallrizz-preview -a add -x "$FZF_PREVIEW_LEFT" -y "$FZF_PREVIEW_TOP" --max-width "$FZF_PREVIEW_COLUMNS" --max-height "$FZF_PREVIEW_LINES" -f "$f" >/dev/null 2>&1`;
+    const paced = spacing > 0
+      ? `if command -v flock >/dev/null; then exec 9>"${socket}.lock"; flock 9; ` +
+        `now=$(date +%s%3N); last=$(cat "${socket}.last" 2>/dev/null); ` +
+        `w=$(( \${last:-0} + ${spacing} - now )); ` +
+        `if [ "$w" -gt 0 ] && [ "$w" -le ${spacing} ]; then sleep "$(awk "BEGIN{print $w/1000}")"; fi; fi; ` +
+        `${add}; date +%s%3N > "${socket}.last"`
+      : add;
+    let fallback = ":";
+    if (commandExists("chafa")) {
+      const [self] = OS.readlink("/proc/self/exe");
+      const bin = self || "WallRizz";
+      fallback = `WALLRIZZ_TERMINAL=${getTerminalBrand()} "${bin}" -P symbols --render-tile "$f" </dev/tty 2>/dev/null`;
+    }
+    return `--preview='${decode}; if ${alive}; then ${paced}; else ${fallback}; fi'`;
+  }
+
+  stopUeberzug(layer) {
+    if (!layer) return;
+    const socket = layer.socketPath();
+    layer.stop();
+    if (socket) {
+      OS.remove(`${socket}.lock`);
+      OS.remove(`${socket}.last`);
+    }
   }
 
   toBase64(str) {
-    const chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let result = "";
-    let i = 0;
-
-    while (i < str.length) {
-      const a = str.charCodeAt(i++);
-      const b = i < str.length ? str.charCodeAt(i++) : 0;
-      const c = i < str.length ? str.charCodeAt(i++) : 0;
-
-      const idx1 = a >> 2;
-      const idx2 = ((a & 3) << 4) | (b >> 4);
-      const idx3 = ((b & 15) << 2) | (c >> 6);
-      const idx4 = c & 63;
-
-      result += chars[idx1] +
-        chars[idx2] +
-        (i - 2 < str.length ? chars[idx3] : "=") +
-        (i - 1 < str.length ? chars[idx4] : "=");
-    }
-
-    return result;
+    return base64Utf8(str);
   }
 }

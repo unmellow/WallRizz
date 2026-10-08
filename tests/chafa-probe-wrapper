@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Test wrapper around the real chafa: claims --probe support (chafa >= 1.16)
+# in --help, logs every render argv to $CHAFA_ARGV_LOG, and strips
+# "--probe X" before running the real chafa (which may be older).
+self_dir=$(cd "$(dirname "$0")" && pwd)
+real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd:) command -v chafa)
+case "$1" in
+  --help) "$real" --help; echo "      --probe=ARG    Probe terminal's capabilities and wait for response"; exit 0 ;;
+  --version) exec "$real" --version ;;
+esac
+echo "$*" >> "${CHAFA_ARGV_LOG:-/dev/null}"
+args=(); skip=0
+for a in "$@"; do
+  if ((skip)); then skip=0; continue; fi
+  if [[ $a == --probe ]]; then skip=1; continue; fi
+  args+=("$a")
+done
+exec "$real" "${args[@]}"

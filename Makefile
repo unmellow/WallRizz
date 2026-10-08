@@ -31,7 +31,7 @@ src/WallRizz: $(SOURCES)
 quickjs/qjs:
 	$(MAKE) -C quickjs -j$(JOBS) qjs
 
-test: quickjs/qjs
+test: quickjs/qjs src/WallRizz
 	quickjs/qjs --std --module tests/imageProtocol.test.js
 	tests/make-scan-tree.sh /tmp/wallrizz-scan-tree
 	quickjs/qjs --std --module tests/scan.test.js /tmp/wallrizz-scan-tree
@@ -39,6 +39,11 @@ test: quickjs/qjs
 	magick -size 320x180 plasma:fractal -depth 8 /tmp/wallrizz-tile-home/thumb.png
 	HOME=/tmp/wallrizz-tile-home quickjs/qjs --std --module tests/tileCache.test.js /tmp/wallrizz-tile-home/thumb.png
 	quickjs/qjs --std --module tests/ueberzug.test.js tests/mock-ueberzugpp /tmp/wallrizz-ueberzug-test.log
+	python3 tests/gallery-resize.test.py src/WallRizz tests/mock-ueberzugpp /tmp/wallrizz-resize-test
+	@if command -v chafa >/dev/null; then \
+		tests/probe.test.sh src/WallRizz /tmp/wallrizz-probe-test && \
+		python3 tests/gallery-ueberzug.test.py src/WallRizz tests/mock-ueberzugpp /tmp/wallrizz-gallery-test; \
+	else echo "probe / gallery-ueberzug tests skipped: chafa not installed"; fi
 
 install: src/WallRizz
 	install -Dm755 src/WallRizz "$(DESTDIR)$(BINDIR)/WallRizz"

@@ -7,10 +7,12 @@ import { Process, ProcessSync } from "../../qjs-ext-lib/src/process.js";
 import {
   chafaArgs,
   chafaSymbolOptions,
+  detectBrand,
   detectMultiplexer,
   parseChafaFeatures,
   pngSize,
   resolveImageProtocol,
+  utf8Bytes,
 } from "./imageProtocol.js";
 import { cursorTo } from "../../helpers/cursor.js";
 
@@ -84,7 +86,8 @@ export function chafaFeatures() {
   const bin = findCommand("chafa");
   if (!bin) return (features = null);
   const [st] = OS.stat(bin);
-  const stamp = `${bin}|${st?.mtime}|${st?.size}`;
+  // bump the schema when parseChafaFeatures() learns a new field
+  const stamp = `v2|${bin}|${st?.mtime}|${st?.size}`;
   const cacheFile = `${STD.getenv("HOME")}/.cache/WallRizz/chafa-features.json`;
   try {
     const cached = JSON.parse(STD.loadFile(cacheFile) ?? "null");
@@ -186,6 +189,7 @@ export function buildChafaArgs(protocol, columns, rows) {
   const env = STD.getenviron();
   return chafaArgs(protocol, columns, rows, env, {
     passthroughNone: passthroughNoneNeeded(env),
+    probeOff: Boolean(chafaFeatures()?.probe),
     symbolOptions: protocol === "symbols"
       ? chafaSymbolOptions(chafaFeatures(), terminalBrand, env)
       : undefined,
@@ -217,6 +221,51 @@ export async function renderWithChafaArgs(argv) {
     );
   }
   return p.stdout;
+}
+
+/**
+ * Write to the terminal (fd 1) completely, also when the tty's open file
+ * description was switched to O_NONBLOCK by another process sharing it
+ * (chafa >= 1.16 does that while probing, even with WallRizz's stdin): a
+ * plain buffered write then fails with EAGAIN half way through a sixel or
+ * iTerm2 sequence and the rest shows up as text. EAGAIN/EINTR are retried.
+ */
+export function writeOut(str) {
+  STD.out.flush();
+  if (!str) return;
+  let bytes;
+  if (!/[^\x00-\x7f]/.test(str)) {
+    // sixel / iTerm2 / kitty sequences are plain ASCII
+    bytes = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i);
+  } else {
+    bytes = new Uint8Array(utf8Bytes(str));
+  }
+  const buf = bytes.buffer;
+  let off = 0;
+  let retries = 0;
+  while (off < bytes.length) {
+    const n = OS.write(1, buf, off, bytes.length - off);
+    if (n > 0) {
+      off += n;
+      retries = 0;
+      continue;
+    }
+    // -11 EAGAIN/EWOULDBLOCK, -4 EINTR (Linux); give up after ~5 s
+    if ((n === -11 || n === -4 || n === 0) && retries++ < 5000) {
+      OS.sleep(1);
+      continue;
+    }
+    break;
+  }
+}
+
+/** True when running inside kitty itself (not another kitty-protocol terminal). */
+export function insideKitty(env = STD.getenviron()) {
+  return detectBrand(env)?.brand === "kitty";
+}
+export function insideWezterm(env = STD.getenviron()) {
+  return detectBrand(env)?.brand === "wezterm";
 }
 
 /**

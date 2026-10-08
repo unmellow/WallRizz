@@ -163,7 +163,8 @@ export class TileCache {
     // everything that changes the encoded bytes besides the image and box
     this.encoderId = protocol === "iterm"
       ? `jpeg-q${JPEG_QUALITY}`
-      : `${buildChafaArgs(protocol, 1, 1).join(" ")}|chafa-${chafaFeatures()?.version}` +
+      // ("--probe off" doesn't change chafa's output: keep old cache keys)
+      : `${buildChafaArgs(protocol, 1, 1).join(" ").replace(" --probe off", "")}|chafa-${chafaFeatures()?.version}` +
         (protocol === "sixel" ? `|px-${this.cellPx}` : "");
     this.stats = { memory: 0, disk: 0, encoded: 0 };
   }

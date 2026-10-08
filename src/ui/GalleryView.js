@@ -15,15 +15,24 @@ import {
   keySequences,
 } from "../../helpers/terminal.js";
 import {
+  commandExists,
   getImageProtocol,
   imagePixelSize,
+  insideKitty,
   positionOutput,
   queryCellSize,
   renderWithChafa,
   requireChafa,
+  writeOut,
 } from "./terminalImage.js";
 import { installUeberzugSignalHandlers, UeberzugLayer } from "./ueberzug.js";
-import { fitImageInBox, parseCellPx } from "./imageProtocol.js";
+import {
+  base64Utf8,
+  fitImageInBox,
+  kittyFileEscape,
+  parseCellPx,
+  regrid,
+} from "./imageProtocol.js";
 import { encodeJpegPayload, itermEscape, TileCache } from "./tileCache.js";
 import { getProcessLimit } from "../core/utils/async.js";
 
@@ -33,6 +42,16 @@ const SIGWINCH = 28;
 const FALLBACK_CELL_PX = { width: 10, height: 20 };
 // let ueberzugpp drop the old overlays before the new page's are mapped
 const UEBERZUG_SETTLE_MS = 30;
+// a crashed ueberzugpp is restarted this often per session, then WallRizz
+// falls back to chafa symbols
+const UEBERZUG_MAX_RESTARTS = 2;
+// resize: redraw once the size has been stable this long; the size is also
+// polled, in case a SIGWINCH is missed (e.g. during startup)
+const RESIZE_SETTLE_MS = 150;
+const RESIZE_POLL_MS = 400;
+// kitty graphics: delete every image (layer based terminals keep images
+// across a text clear)
+const KITTY_DELETE_ALL = "\x1b_Ga=d,d=A,q=2\x1b\\";
 
 export class GalleryView {
   constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath, onFocus) {
@@ -42,10 +61,15 @@ export class GalleryView {
     this.handleSelection = handleSelection;
     this.getWallpaperPath = getWallpaperPath;
     this.onFocusCallback = onFocus;
-    // "kitty" keeps the original native kitty graphics path untouched;
-    // everything else (iterm, sixel, symbols) is drawn with chafa.
+    // "kitty" inside kitty itself keeps the original native kitty graphics
+    // path; everything else (iterm, sixel, symbols, ueberzug, and kitty
+    // graphics in other terminals such as WezTerm, which put the images
+    // into the cell grid where the native path's full-screen erase deletes
+    // them) uses the cell-safe tile path.
     this.protocol = config.resolvedImageProtocol ?? "kitty";
-    this.isKitty = this.protocol === "kitty";
+    this.isKitty = this.protocol === "kitty" && insideKitty();
+    this.statusLine = null;
+    this.ueberzugRestarts = 0;
   }
 
   async render() {
@@ -56,11 +80,12 @@ export class GalleryView {
 
     const [terminalWidth, terminalHeight] = OS.ttyGetWinSize();
 
+    this.processLimit = this.config.processLimit ??
+      Math.max(1, await getProcessLimit());
+
     if (this.protocol === "ueberzug") {
-      const output = getImageProtocol(this.config).ueberzugOutput ?? "x11";
-      const layer = new UeberzugLayer(output);
-      if (await layer.start()) {
-        this.ueberzug = layer;
+      this.ueberzugOutput = getImageProtocol(this.config).ueberzugOutput ?? "x11";
+      if (await this.startUeberzug()) {
         installUeberzugSignalHandlers(() => {
           STD.out.puts(exitAlternativeScreen + clearTerminal + cursorShow);
           STD.out.flush();
@@ -80,20 +105,21 @@ export class GalleryView {
       this.cellPxText = cellPxText;
     }
 
-    if (!this.isKitty && !this.ueberzug) {
-      this.tiles = new TileCache({
-        protocol: this.protocol,
-        cellPx: this.protocol === "sixel" ? this.cellPxText : null,
-        limit: this.config.processLimit ?? Math.max(1, await getProcessLimit()),
-      });
+    if (!this.isKitty && !this.ueberzug && this.protocol !== "kitty") {
+      this.makeTileCache();
     }
 
-    const gridSize = this.config.enablePagination
-      ? `${this.config.gridSize[1]}x${this.config.gridSize[0]}`
-      : this.autoGridSize(terminalWidth, terminalHeight);
+    // grid for a terminal size; the cell-safe path re-evaluates it whenever
+    // the size changes (resize, or the compositor resizing a new window
+    // after WallRizz already drew its first page)
+    const gridFor = (width, height) =>
+      this.config.enablePagination
+        ? `${this.config.gridSize[1]}x${this.config.gridSize[0]}`
+        : this.autoGridSize(width, height);
 
     await this.gallery(pngPaths, {
-      gridSize,
+      gridSize: gridFor(terminalWidth, terminalHeight),
+      gridFor,
       highlightType: this.config.highlight,
       terminalSize: `${terminalWidth}x${terminalHeight}`,
       cellPadding: {
@@ -112,6 +138,54 @@ export class GalleryView {
       },
       getHiRes: (png) => this.getWallpaperPath(png.meta),
     }).catch(print);
+  }
+
+  makeTileCache() {
+    this.tiles = new TileCache({
+      protocol: this.protocol,
+      cellPx: this.protocol === "sixel" ? this.cellPxText : null,
+      limit: this.processLimit,
+    });
+  }
+
+  /**
+   * Start (or restart) the Überzug++ layer. Every restart doubles the pause
+   * between adds. On death: restart up to UEBERZUG_MAX_RESTARTS times and
+   * redraw, then fall back to chafa symbols for the rest of the session.
+   * @returns {Promise<boolean>}
+   */
+  async startUeberzug(spacingMs) {
+    const layer = new UeberzugLayer(this.ueberzugOutput, {
+      spacingMs,
+      onDeath: (reason) => this.onUeberzugDeath(layer, reason),
+    });
+    if (!(await layer.start())) return false;
+    this.ueberzug = layer;
+    return true;
+  }
+
+  async onUeberzugDeath(layer, reason) {
+    if (this.ueberzug !== layer) return; // stopped / replaced already
+    this.ueberzug = null;
+    this.ueberzugDeaths = [...(this.ueberzugDeaths ?? []), reason];
+    if (this.ueberzugRestarts < UEBERZUG_MAX_RESTARTS) {
+      this.ueberzugRestarts++;
+      if (await this.startUeberzug(Math.max(layer.spacingMs * 2, 50))) {
+        this.redraw?.();
+        return;
+      }
+    }
+    // give up on Überzug++ for this session
+    if (commandExists("chafa")) {
+      this.protocol = "symbols";
+      this.makeTileCache();
+      this.statusLine = `Überzug++ ${reason} (${this.ueberzugDeaths.length}x): ` +
+        "using text symbols for this session";
+    } else {
+      this.protocol = "none";
+      this.statusLine = `Überzug++ ${reason}: no images (install chafa for text symbols)`;
+    }
+    this.redraw?.();
   }
 
   autoGridSize(terminalWidth, terminalHeight) {
@@ -135,29 +209,12 @@ export class GalleryView {
     return { width, height };
   }
 
+  /**
+   * base64 of the image path for kitty's t=f. (The original encoder padded
+   * with "A" instead of "=", appending NUL bytes to the decoded path.)
+   */
   toBase64(str) {
-    const chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let result = "";
-    let i = 0;
-
-    while (i < str.length) {
-      const a = str.charCodeAt(i++);
-      const b = i < str.length ? str.charCodeAt(i++) : 0;
-      const c = i < str.length ? str.charCodeAt(i++) : 0;
-
-      const idx1 = a >> 2;
-      const idx2 = ((a & 3) << 4) | (b >> 4);
-      const idx3 = ((b & 15) << 2) | (c >> 6);
-      const idx4 = c & 63;
-
-      result += chars[idx1] +
-        chars[idx2] +
-        (i - 2 < str.length ? chars[idx3] : "=") +
-        (i - 1 < str.length ? chars[idx4] : "=");
-    }
-
-    return result;
+    return base64Utf8(str);
   }
 
   async renderImage(pngSource, size, position, sourceRect) {
@@ -252,6 +309,7 @@ export class GalleryView {
     const rows = fit.rows;
     x += fit.dx;
     y += fit.dy;
+    if (this.protocol === "none") return;
     if (this.ueberzug) {
       this.ueberzug.removeAll();
       this.fullGen = (this.fullGen ?? 0) + 1;
@@ -268,7 +326,18 @@ export class GalleryView {
       return;
     }
     let output;
-    if (this.protocol === "iterm") {
+    if (this.protocol === "kitty") {
+      // kitty graphics outside kitty: a PNG file the terminal reads (t=f)
+      const png = `${HOME_DIR}/.cache/WallRizz/fullscreen-kitty.png`;
+      await execAsync([
+        "magick",
+        `${filePath}[0]`,
+        "-resize",
+        "2560x2560>",
+        png,
+      ]);
+      output = KITTY_DELETE_ALL + kittyFileEscape(png, columns, rows);
+    } else if (this.protocol === "iterm") {
       // compressed JPEG instead of chafa's uncompressed TIFF
       const { b64, size: bytes } = await encodeJpegPayload(
         filePath,
@@ -279,8 +348,7 @@ export class GalleryView {
     } else {
       output = await renderWithChafa(this.protocol, filePath, columns, rows);
     }
-    STD.out.puts(positionOutput(this.protocol, output, x, y));
-    STD.out.flush();
+    writeOut(positionOutput(this.protocol, output, x, y));
   }
 
   async gallery(
@@ -294,6 +362,7 @@ export class GalleryView {
       terminalSize,
       cellPadding = { vertical: 1, horizontal: 1 },
       getHiRes = () => {},
+      gridFor = null,
     },
   ) {
     let currentHighlight = highlightType;
@@ -304,25 +373,53 @@ export class GalleryView {
       ? terminalSize.split("x").map(Number)
       : OS.ttyGetWinSize();
 
-    const [targetCols, targetRows] = gridSize.split("x").map(Number);
+    let [targetCols, targetRows] = gridSize.split("x").map(Number);
     let cellWidth = 0;
     let cellHeight = 0;
     let layoutW = 0;
     let layoutH = 0;
+    let layoutReserved = 0;
+    let currentCell = 0;
+    let currentPage = 0;
+    let maxCellsInGrid = targetCols * targetRows;
+    let totalPages = Math.ceil(pngs.length / maxCellsInGrid);
+    // terminal size the current page was laid out for (cell-safe path)
+    let drawnSize = null;
     const coordinates = [];
     // Grid geometry for a terminal size. kitty computes it once (unchanged);
-    // the other protocols recompute it from the current size on every page
-    // draw, so nothing is placed with stale coordinates after a resize.
+    // the other protocols recompute it, and the grid dimensions, from the
+    // current size on every page draw, so nothing is placed with stale
+    // coordinates after a resize. The selected wallpaper stays selected.
     const layout = (width, height) => {
       layoutW = width;
       layoutH = height;
+      // a status line (e.g. "Überzug++ crashed") takes the last row
+      layoutReserved = !this.isKitty && this.statusLine ? 1 : 0;
+      const gridH = Math.max(1, height - layoutReserved);
+      if (!this.isKitty && gridFor) {
+        const [cols, rows] = gridFor(width, gridH).split("x").map(Number);
+        if (cols > 0 && rows > 0 && (cols !== targetCols || rows !== targetRows)) {
+          const g = regrid(
+            currentPage * maxCellsInGrid + currentCell,
+            cols,
+            rows,
+            pngs.length,
+          );
+          targetCols = cols;
+          targetRows = rows;
+          maxCellsInGrid = g.maxCells;
+          totalPages = g.totalPages;
+          currentPage = g.page;
+          currentCell = g.cell;
+        }
+      }
       cellWidth = Math.floor(width / targetCols);
-      cellHeight = Math.floor(height / targetRows);
+      cellHeight = Math.floor(gridH / targetRows);
 
       const usedWidth = cellWidth * targetCols;
       const usedHeight = cellHeight * targetRows;
       const offsetX = originX + Math.floor((width - usedWidth) / 2);
-      const offsetY = originY + Math.floor((height - usedHeight) / 2);
+      const offsetY = originY + Math.floor((gridH - usedHeight) / 2);
 
       coordinates.length = 0;
       for (let row = 0; row < targetRows; row++) {
@@ -334,15 +431,22 @@ export class GalleryView {
       }
     };
     layout(terminalWidth, terminalHeight);
+    // read the real size at draw time (a new terminal window may still be
+    // 80x24 when WallRizz starts and get resized right after)
     const relayout = () => {
       const [width, height] = OS.ttyGetWinSize();
-      if (width !== layoutW || height !== layoutH) layout(width, height);
+      const reserved = this.statusLine ? 1 : 0;
+      if (width !== layoutW || height !== layoutH || reserved !== layoutReserved) {
+        layout(width, height);
+      }
+      drawnSize = `${width}x${height}`;
     };
-
-    let currentCell = 0;
-    let currentPage = 0;
-    const maxCellsInGrid = targetCols * targetRows;
-    const totalPages = Math.ceil(pngs.length / maxCellsInGrid);
+    // the status line, in the row the layout keeps free for it
+    const statusRow = () =>
+      this.statusLine && layoutReserved
+        ? cursorTo(0, layoutH) + "\x1b[0;2m" +
+          [...this.statusLine].slice(0, Math.max(0, layoutW - 1)).join("") + "\x1b[0m"
+        : "";
 
     const label = () => currentHighlight === "fill" ? "█" : " ";
 
@@ -452,15 +556,16 @@ export class GalleryView {
     // waiting so keys stay responsive; stale tiles of a previous page are
     // never drawn (generation check) and their pending encodes are dropped.
     let pageGeneration = 0;
-    const ueberzug = this.ueberzug;
     // Überzug++: the overlays are separate windows, so every overlay of the
-    // old page is removed before the new page's tiles are added.
-    // Identifiers are unique per draw (page + generation), so a remove that
-    // is still in flight can never hit an overlay of a newer draw.
+    // old page is removed (and adds of it still queued are dropped) before
+    // the new page's tiles are added. Identifiers are unique per draw (page
+    // + generation), so a remove that is still in flight can never hit an
+    // overlay of a newer draw. The layer paces the adds (see ueberzug.js).
     const renderPageOverlays = (skipFocus = false) => {
+      const ueberzug = this.ueberzug;
       ueberzug.removeAll();
       relayout();
-      STD.out.puts(clearTerminal);
+      STD.out.puts(clearTerminal + statusRow());
       highlightedCell = null;
       const generation = ++pageGeneration;
       renderHighlight(currentCell);
@@ -472,7 +577,10 @@ export class GalleryView {
         overlays.push({ i, thumb, box: fitTile(i, thumb) });
       }
       OS.setTimeout(() => {
-        if (generation !== pageGeneration || this.fullscreen) return;
+        if (
+          generation !== pageGeneration || this.fullscreen ||
+          this.ueberzug !== ueberzug
+        ) return;
         for (const { i, thumb, box } of overlays) {
           // ueberzug cells are 0-based, cursorTo rows are 1-based
           ueberzug.add(
@@ -494,18 +602,18 @@ export class GalleryView {
     };
 
     const renderPageTiles = (skipFocus = false) => {
-      if (ueberzug) return renderPageOverlays(skipFocus);
+      if (this.ueberzug) return renderPageOverlays(skipFocus);
       relayout();
-      STD.out.puts(clearTerminal);
+      const kittyCells = this.protocol === "kitty";
+      STD.out.puts((kittyCells ? KITTY_DELETE_ALL : "") + clearTerminal + statusRow());
       highlightedCell = null;
       const generation = ++pageGeneration;
-      this.tiles.cancelPending();
+      this.tiles?.cancelPending();
       renderHighlight(currentCell);
 
       const draw = (box, out) => {
         if (out === null || generation !== pageGeneration || this.fullscreen) return;
-        STD.out.puts(positionOutput(this.protocol, out, box.x, box.y));
-        STD.out.flush();
+        writeOut(positionOutput(this.protocol, out, box.x, box.y));
         // images never overlap the frame, but repaint it anyway
         redrawHighlightFrame();
       };
@@ -513,8 +621,14 @@ export class GalleryView {
       const startIdx = currentPage * maxCellsInGrid;
       const pending = [];
       for (let i = 0; i < maxCellsInGrid && startIdx + i < pngs.length; i++) {
+        if (!this.tiles && !kittyCells) break; // no image protocol left
         const thumb = pngs[startIdx + i].filePath;
         const box = fitTile(i, thumb);
+        if (kittyCells) {
+          // the terminal reads and scales the PNG thumbnail itself
+          draw(box, kittyFileEscape(thumb, box.columns, box.rows));
+          continue;
+        }
         const cached = this.tiles.peek(thumb, box.columns, box.rows);
         if (cached !== null) {
           draw(box, cached);
@@ -529,7 +643,7 @@ export class GalleryView {
 
       // prefetch the next page in the background (encode only, no drawing)
       Promise.all(pending).then(() => {
-        if (generation !== pageGeneration) return;
+        if (generation !== pageGeneration || !this.tiles) return;
         const nextStart = (currentPage + 1) * maxCellsInGrid;
         for (let i = 0; i < maxCellsInGrid && nextStart + i < pngs.length; i++) {
           const thumb = pngs[nextStart + i].filePath;
@@ -580,16 +694,60 @@ export class GalleryView {
       }
     };
 
+    let isFullScreen = false;
+    let zoomLevel = 1.0;
+    let panX = 0;
+    let panY = 0;
+    let imgWidth = 0;
+    let imgHeight = 0;
+
+    // Resize (non-kitty): when the size really changed, drop all Überzug++
+    // overlays at once (they don't move with the text) and redraw from a
+    // fresh layout (grid dimensions included) once resizing settles.
+    // Installed before the first draw, and backed by a size poll, so a
+    // resize that happens while the first page is being drawn (a new
+    // terminal window growing from 80x24) is never missed. Spurious
+    // SIGWINCHs that leave the size unchanged are ignored, so they can't
+    // trigger redraw loops.
+    let resizeTimer = null;
+    let pollTimer = null;
+    let active = true;
+    let renderFullscreenRef = null; // defined with the key handlers below
+    const redraw = () => {
+      if (!active) return;
+      if (isFullScreen) renderFullscreenRef?.().catch(() => {});
+      else renderPage(true);
+    };
+    const onResize = () => {
+      if (!active) return;
+      const size = OS.ttyGetWinSize().join("x");
+      if (size === drawnSize && !resizeTimer) return;
+      this.ueberzug?.removeAll();
+      if (resizeTimer) OS.clearTimeout(resizeTimer);
+      resizeTimer = OS.setTimeout(() => {
+        resizeTimer = null;
+        redraw();
+      }, RESIZE_SETTLE_MS);
+    };
+    const poll = () => {
+      pollTimer = OS.setTimeout(() => {
+        pollTimer = null;
+        if (!active) return;
+        if (drawnSize !== null) onResize();
+        poll();
+      }, RESIZE_POLL_MS);
+    };
+    if (!this.isKitty) {
+      OS.signal(SIGWINCH, onResize);
+      poll();
+      // Überzug++ restart / fallback redraws through this
+      this.redraw = redraw;
+    }
+
     OS.ttySetRaw();
     STD.out.puts(cursorHide);
     try {
       await renderPage();
-      let isFullScreen = false;
-      let zoomLevel = 1.0;
-      let panX = 0;
-      let panY = 0;
-      let imgWidth = 0;
-      let imgHeight = 0;
 
     const moveSelectionDown = () => {
       if (isFullScreen) return;
@@ -633,6 +791,12 @@ export class GalleryView {
         this._fullW = imgWidth;
         this._fullH = imgHeight;
         [screenW, screenH] = OS.ttyGetWinSize();
+        drawnSize = `${screenW}x${screenH}`;
+        if (this.statusLine) {
+          STD.out.puts(cursorTo(0, screenH) + "\x1b[0;2m" +
+            [...this.statusLine].slice(0, Math.max(0, screenW - 1)).join("") + "\x1b[0m");
+          screenH -= 1;
+        }
       }
 
       // BUG: s/v/w/h source-rect params are ignored by kitty, so pan offsets do nothing.
@@ -647,6 +811,8 @@ export class GalleryView {
         h: Math.round(srcH),
       });
     };
+
+    renderFullscreenRef = renderFullscreen;
 
     const toggleFullscreen = async () => {
       const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
@@ -777,27 +943,6 @@ export class GalleryView {
       exit();
     };
 
-    // Resize (non-kitty): when the size really changed, drop all Überzug++
-    // overlays at once (they don't move with the text) and redraw from a
-    // fresh layout once resizing settles. Spurious SIGWINCHs that leave the
-    // size unchanged are ignored, so they can't trigger redraw loops.
-    let resizeTimer = null;
-    let drawnSize = OS.ttyGetWinSize().join("x");
-    if (!this.isKitty) {
-      OS.signal(SIGWINCH, () => {
-        const size = OS.ttyGetWinSize().join("x");
-        if (size === drawnSize && !resizeTimer) return;
-        this.ueberzug?.removeAll();
-        if (resizeTimer) OS.clearTimeout(resizeTimer);
-        resizeTimer = OS.setTimeout(() => {
-          resizeTimer = null;
-          drawnSize = OS.ttyGetWinSize().join("x");
-          if (isFullScreen) renderFullscreen().catch(() => {});
-          else renderPage(true);
-        }, 150);
-      });
-    }
-
     // kitty keeps the original blocking key reader; the other protocols need
     // the event loop to keep running between keys (progressive tiles,
     // background prefetch).
@@ -865,6 +1010,10 @@ export class GalleryView {
     });
 
     } finally {
+      active = false;
+      if (resizeTimer) OS.clearTimeout(resizeTimer);
+      if (pollTimer) OS.clearTimeout(pollTimer);
+      this.redraw = null;
       if (!this.isKitty) OS.signal(SIGWINCH, null);
       if (this.ueberzug) {
         this.ueberzug.stop();

@@ -319,7 +319,7 @@ export function chafaFormat(protocol) {
  * Parse chafa capabilities from `chafa --version` and `chafa --help` output.
  * @param {string} versionText
  * @param {string} helpText
- * @returns {{version: string, sextant: boolean, octant: boolean, work: boolean, passthrough: boolean}}
+ * @returns {{version: string, sextant: boolean, octant: boolean, work: boolean, passthrough: boolean, probe: boolean}}
  */
 export function parseChafaFeatures(versionText = "", helpText = "") {
   const version = /version\s+(\d+\.\d+(?:\.\d+)?)/i.exec(versionText)?.[1] ?? "unknown";
@@ -331,6 +331,8 @@ export function parseChafaFeatures(versionText = "", helpText = "") {
     octant: /\boctant\b/.test(classes),
     work: /--work\b/.test(helpText),
     passthrough: /--passthrough\b/.test(helpText),
+    // chafa >= 1.16 probes the terminal and waits up to 5 s for replies
+    probe: /--probe\b/.test(helpText),
   };
 }
 
@@ -371,6 +373,7 @@ export function chafaSymbolOptions(features, brand, env = {}) {
  * @param {object} [opts]
  * @param {boolean} [opts.passthroughNone] - add "--passthrough none" (chafa >= 1.14)
  * @param {string[]} [opts.symbolOptions] - chafaSymbolOptions() result
+ * @param {boolean} [opts.probeOff] - add "--probe off" (chafa >= 1.16)
  * @returns {string[]}
  */
 export function chafaArgs(protocol, columns, rows, env, opts = {}) {
@@ -394,7 +397,92 @@ export function chafaArgs(protocol, columns, rows, env, opts = {}) {
     if (opts.symbolOptions) args.push(...opts.symbolOptions);
   }
   if (opts.passthroughNone) args.push("--passthrough", "none");
+  // Never probe: WallRizz owns the tty in raw mode and its key reader eats
+  // the replies (chafa then waits the full 5 s), and the probe flips
+  // O_NONBLOCK on the shared tty, which truncates WallRizz's own writes.
+  // WallRizz already knows the protocol, size and cell pixels.
+  if (opts.probeOff) args.push("--probe", "off");
   return args;
+}
+
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/** UTF-8 bytes of a string (lone surrogates become U+FFFD). */
+export function utf8Bytes(str) {
+  const out = [];
+  for (const ch of String(str)) {
+    let c = ch.codePointAt(0);
+    if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd;
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    else if (c < 0x10000) {
+      out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    } else {
+      out.push(
+        0xf0 | (c >> 18),
+        0x80 | ((c >> 12) & 63),
+        0x80 | ((c >> 6) & 63),
+        0x80 | (c & 63),
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Standard (RFC 4648) base64 of a string's UTF-8 bytes, with correct "="
+ * padding. (The original WallRizz encoder padded with "A"s, i.e. appended
+ * NUL bytes to the decoded path, which kitty tolerates but WezTerm doesn't:
+ * it can't open "path\0".)
+ */
+export function base64Utf8(str) {
+  const bytes = utf8Bytes(str);
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const b = bytes[i + 1];
+    const c = bytes[i + 2];
+    out += B64[a >> 2] + B64[((a & 3) << 4) | ((b ?? 0) >> 4)] +
+      (b === undefined ? "=" : B64[((b & 15) << 2) | ((c ?? 0) >> 6)]) +
+      (c === undefined ? "=" : B64[c & 63]);
+  }
+  return out;
+}
+
+/**
+ * kitty graphics "transmit and display a PNG file" escape (t=f, f=100),
+ * scaled into columns x rows cells, cursor not moved (C=1), no replies
+ * (q=2). Used for terminals other than kitty itself (WezTerm, Ghostty,
+ * Konsole...), where images are drawn into the cell grid.
+ */
+export function kittyFileEscape(path, columns, rows) {
+  const c = Math.max(1, Math.floor(columns));
+  const r = Math.max(1, Math.floor(rows));
+  return `\x1b_Ga=T,t=f,f=100,q=2,C=1,c=${c},r=${r};${base64Utf8(path)}\x1b\\`;
+}
+
+/**
+ * Pause (ms) between two Überzug++ "add" commands.
+ * ueberzugpp's Wayland canvas talks to the compositor IPC (sway/Hyprland/
+ * Wayfire/niri socket) from two threads without a lock: the command thread
+ * (new window: no_focus/floating) and the Wayland event thread (configure of
+ * the previous window: get_tree + move). Adds that arrive before the
+ * previous window has been placed interleave the two conversations on the
+ * one socket, the JSON reply parse throws and ueberzugpp aborts
+ * (reproduced with 2.9.10 on headless sway). X11 has no such IPC.
+ * WALLRIZZ_UEBERZUG_SPACING_MS overrides.
+ */
+//
+// Measured on headless sway 1.10 (pixman) with ueberzugpp 2.9.10, bursts of
+// 15 adds (+ removes, two rounds) per run: with 2-100 ms between adds
+// ueberzugpp aborted in 74 of 76 runs (15, 20 and 25 ms: 23 of 24), with
+// 150 ms it survived 8 of 8 runs. A crash still restarts the layer with
+// twice the spacing (see GalleryView).
+export const UEBERZUG_ADD_SPACING_MS = { wayland: 150, default: 5 };
+export function ueberzugSpacing(output, env = {}) {
+  const custom = Number(env.WALLRIZZ_UEBERZUG_SPACING_MS);
+  if (env.WALLRIZZ_UEBERZUG_SPACING_MS !== undefined && custom >= 0) return custom;
+  return output === "wayland" ? UEBERZUG_ADD_SPACING_MS.wayland : UEBERZUG_ADD_SPACING_MS.default;
 }
 
 /**
@@ -489,4 +577,25 @@ export function pngSize(bytes) {
   const width = u32(16);
   const height = u32(20);
   return width && height ? { width, height } : null;
+}
+
+/**
+ * Grid bookkeeping after the grid dimensions changed (resize): keep the
+ * selected wallpaper selected and recompute page / cell / page count.
+ * @param {number} selected - global index of the selected wallpaper
+ * @param {number} cols
+ * @param {number} rows
+ * @param {number} count - number of wallpapers
+ * @returns {{maxCells: number, totalPages: number, page: number, cell: number}}
+ */
+export function regrid(selected, cols, rows, count) {
+  const maxCells = Math.max(1, cols * rows);
+  const totalPages = Math.max(1, Math.ceil(count / maxCells));
+  const sel = Math.max(0, Math.min(selected, Math.max(0, count - 1)));
+  return {
+    maxCells,
+    totalPages,
+    page: Math.floor(sel / maxCells),
+    cell: sel % maxCells,
+  };
 }

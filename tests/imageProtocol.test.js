@@ -1,5 +1,10 @@
 // Run with: qjs --module tests/imageProtocol.test.js   (or: node tests/imageProtocol.test.js)
 import {
+  base64Utf8,
+  kittyFileEscape,
+  regrid,
+  ueberzugSpacing,
+  utf8Bytes,
   chafaArgs,
   chafaSymbolOptions,
   parseChafaFeatures,
@@ -134,9 +139,9 @@ const HELP_114 = "  -w, --work=NUM  How hard\n      --passthrough=MODE\nAccepted
 const HELP_116 = HELP_114.replace("sextant", "sextant octant");
 const HELP_OLD = "  -w, --work=NUM\nAccepted classes for --symbols and --fill:\n  all ascii block half quad\n";
 const f114 = parseChafaFeatures("Chafa version 1.14.5\n", HELP_114);
-eq("features 1.14", f114, { version: "1.14.5", sextant: true, octant: false, work: true, passthrough: true });
+eq("features 1.14", f114, { version: "1.14.5", sextant: true, octant: false, work: true, passthrough: true, probe: false });
 eq("features 1.16 octant", parseChafaFeatures("Chafa version 1.16.2", HELP_116).octant, true);
-eq("features old", parseChafaFeatures("Chafa version 1.6.0", HELP_OLD), { version: "1.6.0", sextant: false, octant: false, work: true, passthrough: false });
+eq("features old", parseChafaFeatures("Chafa version 1.6.0", HELP_OLD), { version: "1.6.0", sextant: false, octant: false, work: true, passthrough: false, probe: false });
 eq("symbols alacritty+sextant", chafaSymbolOptions(f114, "alacritty"), ["--symbols", "sextant+quad+half+block+space", "--work", "9"]);
 eq("symbols unknown terminal", chafaSymbolOptions(f114, "unknown"), ["--symbols", "quad+half+block+space", "--work", "9"]);
 eq("symbols old chafa without sextant", chafaSymbolOptions(parseChafaFeatures("Chafa version 1.6.0", HELP_OLD), "alacritty"), ["--symbols", "quad+half+block+space", "--work", "9"]);
@@ -236,6 +241,52 @@ eq(
   "fit_contain",
 );
 eq("uz add without scaler", "scaler" in JSON.parse(ueberzugAdd("i", 0, 0, 1, 1, "p")), false);
+
+// --- chafa --probe (chafa >= 1.16) ---
+eq("features: probe detected", parseChafaFeatures("Chafa version 1.18.2", "  --probe=ARG  Probe terminal's capabilities").probe, true);
+eq("features: no probe (1.14)", parseChafaFeatures("Chafa version 1.14.5", "  --polite on").probe, false);
+for (const proto of ["symbols", "sixel", "iterm", "kitty"]) {
+  const a = chafaArgs(proto, 30, 10, {}, { probeOff: true });
+  eq(`chafa ${proto}: --probe off`, a.slice(a.indexOf("--probe"), a.indexOf("--probe") + 2), ["--probe", "off"]);
+  eq(`chafa ${proto}: no --probe unless supported`, chafaArgs(proto, 30, 10, {}, {}).includes("--probe"), false);
+}
+eq(
+  "chafa symbols: probe off with symbol options + passthrough",
+  chafaArgs("symbols", 30, 10, { COLORTERM: "truecolor" }, {
+    probeOff: true,
+    passthroughNone: true,
+    symbolOptions: ["--symbols", "quad"],
+  }),
+  ["chafa", "-f", "symbols", "-s", "30x10", "--animate", "off", "--polite", "on", "-c", "full", "--symbols", "quad", "--passthrough", "none", "--probe", "off"],
+);
+
+// --- base64 (kitty t=f payload) ---
+eq("b64 len%3=1", base64Utf8("/tmp/a.png"), "L3RtcC9hLnBuZw==");
+eq("b64 len%3=2", base64Utf8("/tmp/ab.png"), "L3RtcC9hYi5wbmc=");
+eq("b64 len%3=0", base64Utf8("/tmp/abc.png"), "L3RtcC9hYmMucG5n");
+eq("b64 utf-8 path", base64Utf8("/home/ü/.cache/WallRizz/pic/391455268"), "L2hvbWUvw7wvLmNhY2hlL1dhbGxSaXp6L3BpYy8zOTE0NTUyNjg=");
+eq("b64 astral", base64Utf8("€𝄞"), "4oKs8J2Eng==");
+eq("b64 empty", base64Utf8(""), "");
+eq("utf8 bytes", utf8Bytes("aü€"), [0x61, 0xc3, 0xbc, 0xe2, 0x82, 0xac]);
+eq(
+  "kitty file escape",
+  kittyFileEscape("/tmp/a.png", 30.7, 9),
+  "\x1b_Ga=T,t=f,f=100,q=2,C=1,c=30,r=9;L3RtcC9hLnBuZw==\x1b\\",
+);
+eq("kitty file escape min 1x1", kittyFileEscape("/tmp/abc.png", 0, 0).includes("c=1,r=1;"), true);
+
+// --- Überzug++ pacing ---
+eq("uz spacing wayland", ueberzugSpacing("wayland", {}), 150);
+eq("uz spacing x11", ueberzugSpacing("x11", {}), 5);
+eq("uz spacing override", ueberzugSpacing("wayland", { WALLRIZZ_UEBERZUG_SPACING_MS: "40" }), 40);
+eq("uz spacing override 0", ueberzugSpacing("wayland", { WALLRIZZ_UEBERZUG_SPACING_MS: "0" }), 0);
+eq("uz spacing bad override", ueberzugSpacing("wayland", { WALLRIZZ_UEBERZUG_SPACING_MS: "x" }), 150);
+
+// --- regrid on resize (selection kept) ---
+eq("regrid 2x2 -> 5x4", regrid(5, 5, 4, 40), { maxCells: 20, totalPages: 2, page: 0, cell: 5 });
+eq("regrid 5x4 -> 2x2", regrid(25, 2, 2, 40), { maxCells: 4, totalPages: 10, page: 6, cell: 1 });
+eq("regrid clamps selection", regrid(99, 3, 3, 10), { maxCells: 9, totalPages: 2, page: 1, cell: 0 });
+eq("regrid empty", regrid(0, 4, 4, 0), { maxCells: 16, totalPages: 1, page: 0, cell: 0 });
 
 log(`imageProtocol tests: ${passed} passed, ${failed} failed`);
 if (failed) {
