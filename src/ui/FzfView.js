@@ -157,16 +157,21 @@ export class FzfView {
    * --render-tile, which renders the cached *thumbnail* through the same
    * on-disk tile cache as the grid view (so revisits/relaunches are instant).
    * The thumbnail path is stored base64 encoded on line 2 of each item (for
-   * the kitty t=f path), so decode it first. stdin is /dev/tty so chafa can
-   * read the cell pixel size.
+   * the kitty t=f path), so decode it first. That encoder leaves NUL bytes
+   * at the end of some paths; they are stripped, otherwise bash prints a
+   * "command substitution: ignored null byte" warning into the preview's
+   * first line, and fzf then can't show an iTerm2 image (it only draws one
+   * that starts on line 1). stdin is /dev/tty so chafa can read the cell
+   * pixel size.
    */
   chafaPreviewCmd(protocol) {
     const [self] = OS.readlink("/proc/self/exe");
     const bin = self || "WallRizz";
-    const cellPx = protocol === "sixel" ? queryCellSize() : null;
+    // cell pixel size: fits the image into the preview (and sixel encoding)
+    const cellPx = queryCellSize();
     const env = `WALLRIZZ_TERMINAL=${getTerminalBrand()}` +
       (cellPx ? ` WALLRIZZ_CELL_PX=${cellPx}` : "");
-    return `--preview='f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d); ${env} "${bin}" -P ${protocol} --render-tile "$f" </dev/tty 2>/dev/null'`;
+    return `--preview='f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d 2>/dev/null | tr -d "\\000"); ${env} "${bin}" -P ${protocol} --render-tile "$f" </dev/tty 2>/dev/null'`;
   }
 
   /**
@@ -177,7 +182,7 @@ export class FzfView {
    * identifier replaces the previous image.
    */
   ueberzugPreviewCmd(socket) {
-    return `--preview='f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d); ueberzugpp cmd -s "${socket}" -i wallrizz-preview -a add -x "$FZF_PREVIEW_LEFT" -y "$FZF_PREVIEW_TOP" --max-width "$FZF_PREVIEW_COLUMNS" --max-height "$FZF_PREVIEW_LINES" -f "$f" >/dev/null 2>&1'`;
+    return `--preview='f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d 2>/dev/null | tr -d "\\000"); ueberzugpp cmd -s "${socket}" -i wallrizz-preview -a add -x "$FZF_PREVIEW_LEFT" -y "$FZF_PREVIEW_TOP" --max-width "$FZF_PREVIEW_COLUMNS" --max-height "$FZF_PREVIEW_LINES" -f "$f" >/dev/null 2>&1'`;
   }
 
   toBase64(str) {

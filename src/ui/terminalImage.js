@@ -9,6 +9,7 @@ import {
   chafaSymbolOptions,
   detectMultiplexer,
   parseChafaFeatures,
+  pngSize,
   resolveImageProtocol,
 } from "./imageProtocol.js";
 import { cursorTo } from "../../helpers/cursor.js";
@@ -233,5 +234,42 @@ export function positionOutput(protocol, output, x, y) {
       .map((line, i) => cursorTo(x, y + i) + line)
       .join("") + "\x1b[0m";
   }
-  return cursorTo(x, y) + body;
+  // Terminals move the cursor below/after a sixel or iTerm2 image (WezTerm
+  // to the line under it): save and restore it so later drawing isn't
+  // shifted and nothing can scroll.
+  return "\x1b7" + cursorTo(x, y) + body + "\x1b8";
+}
+
+const sizes = new Map();
+/**
+ * Pixel size of an image: read from the PNG header (thumbnails are PNG),
+ * else `magick identify`. Memoized per path+mtime.
+ * @returns {{width: number, height: number}|null}
+ */
+export function imagePixelSize(path) {
+  const [st, err] = OS.stat(path);
+  if (err !== 0) return null;
+  const key = `${path}|${st.mtime}|${st.size}`;
+  if (sizes.has(key)) return sizes.get(key);
+  let size = null;
+  const f = STD.open(path, "rb");
+  if (f) {
+    const buf = new ArrayBuffer(24);
+    const n = f.read(buf, 0, 24);
+    f.close();
+    size = pngSize(new Uint8Array(buf, 0, Math.max(0, n)));
+  }
+  if (!size) {
+    try {
+      const p = new ProcessSync(
+        ["magick", "identify", "-format", "%w %h", `${path}[0]`],
+        { passStderr: false },
+      );
+      p.run();
+      const [width, height] = (p.stdout || "").trim().split(" ").map(Number);
+      if (width > 0 && height > 0) size = { width, height };
+    } catch { /* ignore */ }
+  }
+  sizes.set(key, size);
+  return size;
 }

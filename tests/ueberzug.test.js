@@ -27,7 +27,7 @@ layer.add("wallrizz-tile-2", 78, 1, 36, 11, "/c/pic/ü.png");
 eq("tracks shown", [...layer.shown].sort(), ["wallrizz-tile-1", "wallrizz-tile-2"]);
 layer.removeAll();
 eq("removeAll clears", layer.shown.size, 0);
-layer.add("wallrizz-fullscreen", 0, 0, 120, 39, "/w/full.jpg");
+layer.add("wallrizz-full-g1", 0, 0, 120, 39, "/w/full.jpg", "fit_contain");
 layer.stop();
 os.sleep(50);
 eq("stopped process reaped", gone(pid), true);
@@ -39,8 +39,8 @@ eq("log", readLog(), [
   'CMD {"action":"add","identifier":"wallrizz-tile-2","x":78,"y":1,"max_width":36,"max_height":11,"path":"/c/pic/ü.png"}',
   'CMD {"action":"remove","identifier":"wallrizz-tile-1"}',
   'CMD {"action":"remove","identifier":"wallrizz-tile-2"}',
-  'CMD {"action":"add","identifier":"wallrizz-fullscreen","x":0,"y":0,"max_width":120,"max_height":39,"path":"/w/full.jpg"}',
-  'CMD {"action":"remove","identifier":"wallrizz-fullscreen"}',
+  'CMD {"action":"add","identifier":"wallrizz-full-g1","x":0,"y":0,"max_width":120,"max_height":39,"path":"/w/full.jpg","scaler":"fit_contain"}',
+  'CMD {"action":"remove","identifier":"wallrizz-full-g1"}',
   "EOF",
 ]);
 eq("calls after stop are no-ops", (layer.add("x", 0, 0, 1, 1, "p"), layer.shown.size), 0);

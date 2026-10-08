@@ -8,7 +8,8 @@ import WallpaperManager from "./wallpaper/WallpaperManager.js";
 import { UserInterface } from "./ui/UserInterface.js";
 import { testExtensions } from "./extensions/ExtensionHandler.js";
 import { checkForUpdate } from "./core/utils/app.js";
-import { getImageProtocol } from "./ui/terminalImage.js";
+import { getImageProtocol, imagePixelSize } from "./ui/terminalImage.js";
+import { fitImageInBox, parseCellPx } from "./ui/imageProtocol.js";
 import { stopAllUeberzug } from "./ui/ueberzug.js";
 import { TileCache } from "./ui/tileCache.js";
 
@@ -78,14 +79,37 @@ class WallRizz {
     const lines = Number(STD.getenv("FZF_PREVIEW_LINES")) || 20;
     // keep pixel images off the last line so they can't scroll the screen
     const rows = protocol === "symbols" ? lines : Math.max(1, lines - 1);
+    const cellPxText = STD.getenv("WALLRIZZ_CELL_PX");
+    const cell = parseCellPx(cellPxText) ?? { width: 10, height: 20 };
+    const thumb = this.config.renderTile;
+    const size = imagePixelSize(thumb);
+    // aspect-fitted, centered box inside the preview window
+    const fit = fitImageInBox(
+      size?.width,
+      size?.height,
+      Math.max(1, columns - 1),
+      rows,
+      cell.width,
+      cell.height,
+    );
     const tiles = new TileCache({
       protocol,
-      cellPx: STD.getenv("WALLRIZZ_CELL_PX"),
+      cellPx: protocol === "sixel" ? cellPxText : null,
       limit: 1,
     });
-    const out = await tiles.get(this.config.renderTile, columns, rows);
+    const out = await tiles.get(thumb, fit.columns, fit.rows);
     if (out) {
-      STD.out.puts(out.replace(/\n+$/, ""));
+      const body = out.replace(/\n+$/, "");
+      // Only symbols (plain text) are centered. fzf draws a pixel image at
+      // the start of its line whatever precedes it, and shows an iTerm2
+      // image only when it starts on the preview's first line (it assumes
+      // the image needs the whole preview height).
+      const pad = " ".repeat(fit.dx);
+      STD.out.puts(
+        protocol === "symbols"
+          ? "\n".repeat(fit.dy) + body.split("\n").map((line) => pad + line).join("\n")
+          : body,
+      );
       STD.out.flush();
     }
     throw EXIT;

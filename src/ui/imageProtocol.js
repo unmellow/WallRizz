@@ -402,8 +402,8 @@ export function chafaArgs(protocol, columns, rows, env, opts = {}) {
  * shape yazi sends. x/y are 0-based terminal cells; the image is scaled to
  * fit max_width x max_height cells keeping its aspect ratio.
  */
-export function ueberzugAdd(identifier, x, y, maxWidth, maxHeight, path) {
-  return JSON.stringify({
+export function ueberzugAdd(identifier, x, y, maxWidth, maxHeight, path, scaler) {
+  const command = {
     action: "add",
     identifier,
     x: Math.max(0, Math.round(x)),
@@ -411,7 +411,11 @@ export function ueberzugAdd(identifier, x, y, maxWidth, maxHeight, path) {
     max_width: Math.max(1, Math.round(maxWidth)),
     max_height: Math.max(1, Math.round(maxHeight)),
     path,
-  });
+  };
+  // "fit_contain": scale up or down to fit max_width x max_height, keeping
+  // the aspect ratio (ueberzugpp's default "contain" only scales down)
+  if (scaler) command.scaler = scaler;
+  return JSON.stringify(command);
 }
 
 export function ueberzugRemove(identifier) {
@@ -428,4 +432,61 @@ export function ueberzugSocketPath(env, pid) {
     .map((name) => env[name])
     .find((value) => value) ?? "/tmp";
   return `${dir.replace(/\/+$/, "") || "/"}/ueberzugpp-${pid}.socket`;
+}
+
+/**
+ * Fit an image into a box of terminal cells, keeping its aspect ratio, and
+ * center it. Returns the image's own cell box (never larger than the given
+ * box) and its offset inside the box.
+ *
+ * Width is rounded down and height up, so that a terminal which derives
+ * the height from the width (WezTerm ignores the height of an iTerm2 image
+ * when preserveAspectRatio=1) still can't draw outside the box:
+ *   width-limited:  columns == box columns, drawn height == exact fit height
+ *   height-limited: floor(width) -> drawn height <= box height
+ *
+ * @param {number} imgW - image width in pixels
+ * @param {number} imgH - image height in pixels
+ * @param {number} columns - box width in cells
+ * @param {number} rows - box height in cells
+ * @param {number} [cellW] - cell width in pixels
+ * @param {number} [cellH] - cell height in pixels
+ * @returns {{columns: number, rows: number, dx: number, dy: number}}
+ */
+export function fitImageInBox(imgW, imgH, columns, rows, cellW = 10, cellH = 20) {
+  const boxC = Math.max(1, Math.floor(columns));
+  const boxR = Math.max(1, Math.floor(rows));
+  if (!(imgW > 0 && imgH > 0 && cellW > 0 && cellH > 0)) {
+    return { columns: boxC, rows: boxR, dx: 0, dy: 0 };
+  }
+  const scale = Math.min((boxC * cellW) / imgW, (boxR * cellH) / imgH);
+  const fitC = Math.min(boxC, Math.max(1, Math.floor((imgW * scale) / cellW + 1e-6)));
+  const fitR = Math.min(boxR, Math.max(1, Math.ceil((imgH * scale) / cellH - 1e-6)));
+  return {
+    columns: fitC,
+    rows: fitR,
+    dx: Math.floor((boxC - fitC) / 2),
+    dy: Math.floor((boxR - fitR) / 2),
+  };
+}
+
+/** "WxH" (e.g. from CSI 16 t / WALLRIZZ_CELL_PX) -> {width, height} or null */
+export function parseCellPx(value) {
+  const m = /^(\d+)x(\d+)$/.exec(String(value ?? "").trim());
+  if (!m) return null;
+  const width = Number(m[1]);
+  const height = Number(m[2]);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+/** PNG header bytes (>= 24) -> {width, height} or null */
+export function pngSize(bytes) {
+  if (!bytes || bytes.length < 24) return null;
+  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (sig.some((b, i) => bytes[i] !== b)) return null;
+  const u32 = (o) =>
+    ((bytes[o] << 24) | (bytes[o + 1] << 16) | (bytes[o + 2] << 8) | bytes[o + 3]) >>> 0;
+  const width = u32(16);
+  const height = u32(20);
+  return width && height ? { width, height } : null;
 }

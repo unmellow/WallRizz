@@ -7,6 +7,9 @@ import {
   detectBrand,
   normalizeProtocol,
   resolveImageProtocol,
+  fitImageInBox,
+  parseCellPx,
+  pngSize,
   ueberzugAdd,
   ueberzugOutput,
   ueberzugRemove,
@@ -190,6 +193,49 @@ eq("uz remove json", ueberzugRemove("wallrizz-tile-3"), '{"action":"remove","ide
 eq("uz socket default", ueberzugSocketPath({}, 42), "/tmp/ueberzugpp-42.socket");
 eq("uz socket TMPDIR", ueberzugSocketPath({ TMPDIR: "/run/user/1000/" }, 42), "/run/user/1000/ueberzugpp-42.socket");
 eq("uz socket UEBERZUGPP_TMPDIR wins", ueberzugSocketPath({ TMPDIR: "/a", UEBERZUGPP_TMPDIR: "/b" }, 7), "/b/ueberzugpp-7.socket");
+
+// --- fitting images into tiles ---
+// 36x11 cells of 10x20 px = 360x220 px
+eq("fit 16:9 width-limited", fitImageInBox(600, 338, 36, 11, 10, 20), { columns: 36, rows: 11, dx: 0, dy: 0 });
+eq("fit 4:3 height-limited centered", fitImageInBox(451, 338, 36, 11, 10, 20), { columns: 29, rows: 11, dx: 3, dy: 0 });
+eq("fit portrait", fitImageInBox(190, 338, 36, 11, 10, 20), { columns: 12, rows: 11, dx: 12, dy: 0 });
+eq("fit square", fitImageInBox(338, 338, 36, 11, 10, 20), { columns: 22, rows: 11, dx: 7, dy: 0 });
+eq("fit ultrawide vertical centering", fitImageInBox(2100, 300, 36, 11, 10, 20), { columns: 36, rows: 3, dx: 0, dy: 4 });
+eq("fit unknown size -> whole box", fitImageInBox(undefined, undefined, 36, 11, 10, 20), { columns: 36, rows: 11, dx: 0, dy: 0 });
+eq("fit tiny box", fitImageInBox(600, 338, 1, 1, 10, 20), { columns: 1, rows: 1, dx: 0, dy: 0 });
+// property: never larger than the box, and a WezTerm-style height (from the
+// width alone) never overflows the box
+let fitOk = true;
+for (const [iw, ih] of [[600, 338], [451, 338], [190, 338], [338, 338], [600, 100], [100, 600], [599, 337], [1, 1]]) {
+  for (const [c, r] of [[36, 11], [32, 10], [7, 3], [100, 38], [1, 5], [5, 1]]) {
+    for (const [cw, ch] of [[10, 20], [8, 17], [9, 22], [14, 31]]) {
+      const f = fitImageInBox(iw, ih, c, r, cw, ch);
+      // (an image narrower than one cell once fitted is clamped to 1 column)
+      if (Math.min((c * cw) / iw, (r * ch) / ih) * iw < cw) continue;
+      const wezH = (f.columns * cw * ih) / iw;
+      if (
+        f.columns > c || f.rows > r || f.dx + f.columns > c || f.dy + f.rows > r ||
+        wezH > r * ch + 1e-6 || (f.columns * cw) > c * cw
+      ) {
+        fitOk = false;
+        log(`fit overflow ${iw}x${ih} in ${c}x${r} @${cw}x${ch}: ${JSON.stringify(f)} wezH=${wezH}`);
+      }
+    }
+  }
+}
+eq("fit never exceeds box (incl. WezTerm width-only)", fitOk, true);
+eq("cell px", parseCellPx("10x20"), { width: 10, height: 20 });
+eq("cell px bad", parseCellPx("x"), null);
+eq("cell px null", parseCellPx(null), null);
+const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 1, 0xc3, 0, 0, 1, 0x52]);
+eq("png size", pngSize(png), { width: 451, height: 338 });
+eq("png size not png", pngSize(new Uint8Array(24)), null);
+eq(
+  "uz add with scaler",
+  JSON.parse(ueberzugAdd("wallrizz-p0-g1-0", 2, 1, 29, 11, "/t.png", "fit_contain")).scaler,
+  "fit_contain",
+);
+eq("uz add without scaler", "scaler" in JSON.parse(ueberzugAdd("i", 0, 0, 1, 1, "p")), false);
 
 log(`imageProtocol tests: ${passed} passed, ${failed} failed`);
 if (failed) {

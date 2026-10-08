@@ -56,7 +56,7 @@ for (const protocol of ["symbols", "sixel", "iterm"]) {
   eq(`${protocol} output prefix`, out1.startsWith(prefix), true);
   if (protocol === "iterm") {
     eq("iterm payload is JPEG", out1.split(":")[1].startsWith("/9j/"), true);
-    eq("iterm keeps aspect, box in cells", /width=20;height=6;preserveAspectRatio=1/.test(out1), true);
+    eq("iterm keeps aspect, box in cells", /width=20;height=6;preserveAspectRatio=1;doNotMoveCursor=1:/.test(out1), true);
   }
 }
 const [files] = os.readdir(TILE_CACHE_DIR + "symbols/");

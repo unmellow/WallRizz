@@ -128,9 +128,12 @@ export class UeberzugLayer {
     return true;
   }
 
-  /** Show `path` at cell (x, y) (0-based), fit into width x height cells. */
-  add(identifier, x, y, width, height, path) {
-    if (this.send(ueberzugAdd(identifier, x, y, width, height, path))) {
+  /**
+   * Show `path` at cell (x, y) (0-based), fit into width x height cells
+   * (optional ueberzugpp scaler, e.g. "fit_contain").
+   */
+  add(identifier, x, y, width, height, path, scaler) {
+    if (this.send(ueberzugAdd(identifier, x, y, width, height, path, scaler))) {
       this.shown.add(identifier);
     }
   }

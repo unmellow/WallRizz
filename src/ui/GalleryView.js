@@ -16,17 +16,23 @@ import {
 } from "../../helpers/terminal.js";
 import {
   getImageProtocol,
+  imagePixelSize,
   positionOutput,
   queryCellSize,
   renderWithChafa,
   requireChafa,
 } from "./terminalImage.js";
 import { installUeberzugSignalHandlers, UeberzugLayer } from "./ueberzug.js";
+import { fitImageInBox, parseCellPx } from "./imageProtocol.js";
 import { encodeJpegPayload, itermEscape, TileCache } from "./tileCache.js";
 import { getProcessLimit } from "../core/utils/async.js";
 
 // SIGWINCH (28 on Linux, macOS and the BSDs); QuickJS doesn't export it
 const SIGWINCH = 28;
+// cell size assumed when the terminal doesn't answer CSI 16 t
+const FALLBACK_CELL_PX = { width: 10, height: 20 };
+// let ueberzugpp drop the old overlays before the new page's are mapped
+const UEBERZUG_SETTLE_MS = 30;
 
 export class GalleryView {
   constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath, onFocus) {
@@ -66,12 +72,18 @@ export class GalleryView {
       }
     }
 
+    if (!this.isKitty) {
+      // cell pixel size: needed to fit images into tiles (and for sixel
+      // encoding); ask once, before raw mode
+      const cellPxText = queryCellSize();
+      this.cellPx = parseCellPx(cellPxText) ?? FALLBACK_CELL_PX;
+      this.cellPxText = cellPxText;
+    }
+
     if (!this.isKitty && !this.ueberzug) {
-      // sixel tiles depend on the cell pixel size: ask once, before raw mode
-      const cellPx = this.protocol === "sixel" ? queryCellSize() : null;
       this.tiles = new TileCache({
         protocol: this.protocol,
-        cellPx,
+        cellPx: this.protocol === "sixel" ? this.cellPxText : null,
         limit: this.config.processLimit ?? Math.max(1, await getProcessLimit()),
       });
     }
@@ -218,17 +230,40 @@ export class GalleryView {
       filePath = cropFile;
     }
 
-    const columns = size?.columns ?? 20;
-    const rows = size?.rows ?? 10;
+    // fit the (cropped) image into the screen, centered, keeping its aspect
+    // ratio, never touching the last column
+    let x = position?.row ?? 0;
+    let y = position?.column ?? 1;
+    // current size (it may have changed while the crop was being made)
+    const [termW, termH] = OS.ttyGetWinSize();
+    const dims = sourceRect?.w && sourceRect?.h
+      ? { width: sourceRect.w, height: sourceRect.h }
+      : imagePixelSize(filePath);
+    const cell = this.cellPx ?? FALLBACK_CELL_PX;
+    const fit = fitImageInBox(
+      dims?.width,
+      dims?.height,
+      Math.min(size?.columns ?? 20, termW - 1 - x),
+      Math.min(size?.rows ?? 10, termH - y),
+      cell.width,
+      cell.height,
+    );
+    const columns = fit.columns;
+    const rows = fit.rows;
+    x += fit.dx;
+    y += fit.dy;
     if (this.ueberzug) {
       this.ueberzug.removeAll();
+      this.fullGen = (this.fullGen ?? 0) + 1;
+      // ueberzug cells are 0-based, cursorTo rows are 1-based
       this.ueberzug.add(
-        "wallrizz-fullscreen",
-        position?.row ?? 0,
-        (position?.column ?? 1) - 1,
+        `wallrizz-full-g${this.fullGen}`,
+        x,
+        y - 1,
         columns,
         rows,
         filePath,
+        "fit_contain",
       );
       return;
     }
@@ -244,8 +279,6 @@ export class GalleryView {
     } else {
       output = await renderWithChafa(this.protocol, filePath, columns, rows);
     }
-    const x = position?.row ?? 0;
-    const y = position?.column ?? 1;
     STD.out.puts(positionOutput(this.protocol, output, x, y));
     STD.out.flush();
   }
@@ -272,22 +305,39 @@ export class GalleryView {
       : OS.ttyGetWinSize();
 
     const [targetCols, targetRows] = gridSize.split("x").map(Number);
-    const cellWidth = Math.floor(terminalWidth / targetCols);
-    const cellHeight = Math.floor(terminalHeight / targetRows);
-
-    const usedWidth = cellWidth * targetCols;
-    const usedHeight = cellHeight * targetRows;
-    const offsetX = originX + Math.floor((terminalWidth - usedWidth) / 2);
-    const offsetY = originY + Math.floor((terminalHeight - usedHeight) / 2);
-
+    let cellWidth = 0;
+    let cellHeight = 0;
+    let layoutW = 0;
+    let layoutH = 0;
     const coordinates = [];
-    for (let row = 0; row < targetRows; row++) {
-      for (let col = 0; col < targetCols; col++) {
-        const x = offsetX + col * cellWidth;
-        const y = offsetY + row * cellHeight;
-        coordinates.push([x, y, cellWidth, cellHeight]);
+    // Grid geometry for a terminal size. kitty computes it once (unchanged);
+    // the other protocols recompute it from the current size on every page
+    // draw, so nothing is placed with stale coordinates after a resize.
+    const layout = (width, height) => {
+      layoutW = width;
+      layoutH = height;
+      cellWidth = Math.floor(width / targetCols);
+      cellHeight = Math.floor(height / targetRows);
+
+      const usedWidth = cellWidth * targetCols;
+      const usedHeight = cellHeight * targetRows;
+      const offsetX = originX + Math.floor((width - usedWidth) / 2);
+      const offsetY = originY + Math.floor((height - usedHeight) / 2);
+
+      coordinates.length = 0;
+      for (let row = 0; row < targetRows; row++) {
+        for (let col = 0; col < targetCols; col++) {
+          const x = offsetX + col * cellWidth;
+          const y = offsetY + row * cellHeight;
+          coordinates.push([x, y, cellWidth, cellHeight]);
+        }
       }
-    }
+    };
+    layout(terminalWidth, terminalHeight);
+    const relayout = () => {
+      const [width, height] = OS.ttyGetWinSize();
+      if (width !== layoutW || height !== layoutH) layout(width, height);
+    };
 
     let currentCell = 0;
     let currentPage = 0;
@@ -322,14 +372,19 @@ export class GalleryView {
       if (highlightedCell !== null && highlightedCell !== cellIndex) {
         out += frameOf(highlightedCell, [" ", " ", " ", " ", " ", " "]);
       }
-      out += frameOf(
-        cellIndex,
-        currentHighlight === "fill"
-          ? ["█", "█", "█", "█", "█", "█"]
-          : ["─", "│", "╭", "╮", "╰", "╯"],
-      );
+      out += frameOf(cellIndex, frameChars());
       highlightedCell = cellIndex;
       STD.out.puts(out);
+      STD.out.flush();
+    };
+    const frameChars = () =>
+      currentHighlight === "fill"
+        ? ["█", "█", "█", "█", "█", "█"]
+        : ["─", "│", "╭", "╮", "╰", "╯"];
+    // repaint the current selection frame (after images were drawn)
+    const redrawHighlightFrame = () => {
+      if (highlightedCell === null) return;
+      STD.out.puts(frameOf(highlightedCell, frameChars()));
       STD.out.flush();
     };
 
@@ -363,14 +418,33 @@ export class GalleryView {
       STD.out.flush();
     };
 
+    // Inner area of a tile: inside the selection frame (at least one cell of
+    // padding), never in the terminal's last column or last row, where a
+    // pixel image could wrap or scroll the screen.
     const tileBox = (i) => {
-      const coord = coordinates[i];
-      return {
-        rows: cellHeight - cellPadding.horizontal * 2,
-        columns: cellWidth - cellPadding.vertical * 2,
-        x: coord[0] + cellPadding.vertical,
-        y: coord[1] + cellPadding.horizontal,
-      };
+      const [x, y, w, h] = coordinates[i];
+      const padX = Math.max(1, cellPadding.vertical || 0);
+      const padY = Math.max(1, cellPadding.horizontal || 0);
+      const bx = x + padX;
+      const by = y + padY;
+      const columns = Math.min(w - padX * 2, layoutW - 1 - bx);
+      const rows = Math.min(h - padY * 2, layoutH - by);
+      return { x: bx, y: by, columns: Math.max(1, columns), rows: Math.max(1, rows) };
+    };
+    // The image's own box: aspect-fitted inside the tile, centered.
+    const fitTile = (i, imagePath) => {
+      const box = tileBox(i);
+      const size = imagePixelSize(imagePath);
+      const cell = this.cellPx ?? FALLBACK_CELL_PX;
+      const fit = fitImageInBox(
+        size?.width,
+        size?.height,
+        box.columns,
+        box.rows,
+        cell.width,
+        cell.height,
+      );
+      return { x: box.x + fit.dx, y: box.y + fit.dy, columns: fit.columns, rows: fit.rows };
     };
 
     // Non-kitty pages: frame first, then tiles drawn progressively as they
@@ -381,25 +455,38 @@ export class GalleryView {
     const ueberzug = this.ueberzug;
     // Überzug++: the overlays are separate windows, so every overlay of the
     // old page is removed before the new page's tiles are added.
+    // Identifiers are unique per draw (page + generation), so a remove that
+    // is still in flight can never hit an overlay of a newer draw.
     const renderPageOverlays = (skipFocus = false) => {
       ueberzug.removeAll();
+      relayout();
       STD.out.puts(clearTerminal);
       highlightedCell = null;
-      ++pageGeneration;
+      const generation = ++pageGeneration;
       renderHighlight(currentCell);
-      const startIdx = currentPage * maxCellsInGrid;
+      const page = currentPage;
+      const startIdx = page * maxCellsInGrid;
+      const overlays = [];
       for (let i = 0; i < maxCellsInGrid && startIdx + i < pngs.length; i++) {
-        const box = tileBox(i);
-        // ueberzug cells are 0-based, cursorTo rows are 1-based
-        ueberzug.add(
-          `wallrizz-tile-${i}`,
-          box.x,
-          box.y - 1,
-          box.columns,
-          box.rows,
-          pngs[startIdx + i].filePath,
-        );
+        const thumb = pngs[startIdx + i].filePath;
+        overlays.push({ i, thumb, box: fitTile(i, thumb) });
       }
+      OS.setTimeout(() => {
+        if (generation !== pageGeneration || this.fullscreen) return;
+        for (const { i, thumb, box } of overlays) {
+          // ueberzug cells are 0-based, cursorTo rows are 1-based
+          ueberzug.add(
+            `wallrizz-p${page}-g${generation}-${i}`,
+            box.x,
+            box.y - 1,
+            box.columns,
+            box.rows,
+            thumb,
+            "fit_contain",
+          );
+        }
+        redrawHighlightFrame();
+      }, UEBERZUG_SETTLE_MS);
       const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
       if (!skipFocus && pngs[globalIndex]) {
         onFocus(pngs[globalIndex], globalIndex);
@@ -408,6 +495,7 @@ export class GalleryView {
 
     const renderPageTiles = (skipFocus = false) => {
       if (ueberzug) return renderPageOverlays(skipFocus);
+      relayout();
       STD.out.puts(clearTerminal);
       highlightedCell = null;
       const generation = ++pageGeneration;
@@ -418,13 +506,15 @@ export class GalleryView {
         if (out === null || generation !== pageGeneration || this.fullscreen) return;
         STD.out.puts(positionOutput(this.protocol, out, box.x, box.y));
         STD.out.flush();
+        // images never overlap the frame, but repaint it anyway
+        redrawHighlightFrame();
       };
 
       const startIdx = currentPage * maxCellsInGrid;
       const pending = [];
       for (let i = 0; i < maxCellsInGrid && startIdx + i < pngs.length; i++) {
-        const box = tileBox(i);
         const thumb = pngs[startIdx + i].filePath;
+        const box = fitTile(i, thumb);
         const cached = this.tiles.peek(thumb, box.columns, box.rows);
         if (cached !== null) {
           draw(box, cached);
@@ -442,8 +532,9 @@ export class GalleryView {
         if (generation !== pageGeneration) return;
         const nextStart = (currentPage + 1) * maxCellsInGrid;
         for (let i = 0; i < maxCellsInGrid && nextStart + i < pngs.length; i++) {
-          const box = tileBox(i);
-          this.tiles.get(pngs[nextStart + i].filePath, box.columns, box.rows, { low: true })
+          const thumb = pngs[nextStart + i].filePath;
+          const box = fitTile(i, thumb);
+          this.tiles.get(thumb, box.columns, box.rows, { low: true })
             .catch(() => {});
         }
       });
@@ -534,19 +625,21 @@ export class GalleryView {
       panX = Math.max(0, Math.min(panX, imgWidth - srcW));
       panY = Math.max(0, Math.min(panY, imgHeight - srcH));
 
+      let [screenW, screenH] = [terminalWidth, terminalHeight];
       if (!this.isKitty) {
         // clear the previous frame; keep the last row free so a sixel/iTerm2
         // image can never scroll the screen
         STD.out.puts("\x1b[2J");
         this._fullW = imgWidth;
         this._fullH = imgHeight;
+        [screenW, screenH] = OS.ttyGetWinSize();
       }
 
       // BUG: s/v/w/h source-rect params are ignored by kitty, so pan offsets do nothing.
       // Must pre-crop with magick before transmission.
       return this.renderImage({ filePath }, {
-        columns: terminalWidth,
-        rows: this.isKitty ? terminalHeight : terminalHeight - 1,
+        columns: screenW,
+        rows: this.isKitty ? screenH : screenH - 1,
       }, { row: originX, column: originY }, {
         x: Math.round(panX),
         y: Math.round(panY),
@@ -558,8 +651,10 @@ export class GalleryView {
     const toggleFullscreen = async () => {
       const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
       if (pngs[globalIndex]) {
-        // no overlay may outlive the view it belongs to
+        // no overlay may outlive the view it belongs to (and pending adds
+        // of the grid page are dropped)
         this.ueberzug?.removeAll();
+        if (!this.isKitty) pageGeneration++;
         this.fullscreen = !isFullScreen;
         if (isFullScreen = !isFullScreen) {
           print(enterAlternativeScreen);
@@ -682,15 +777,21 @@ export class GalleryView {
       exit();
     };
 
-    // Überzug++ overlays don't move with the text: on resize drop them all
-    // and put them back once the resizing settles.
+    // Resize (non-kitty): when the size really changed, drop all Überzug++
+    // overlays at once (they don't move with the text) and redraw from a
+    // fresh layout once resizing settles. Spurious SIGWINCHs that leave the
+    // size unchanged are ignored, so they can't trigger redraw loops.
     let resizeTimer = null;
-    if (ueberzug) {
+    let drawnSize = OS.ttyGetWinSize().join("x");
+    if (!this.isKitty) {
       OS.signal(SIGWINCH, () => {
-        ueberzug.removeAll();
+        const size = OS.ttyGetWinSize().join("x");
+        if (size === drawnSize && !resizeTimer) return;
+        this.ueberzug?.removeAll();
         if (resizeTimer) OS.clearTimeout(resizeTimer);
         resizeTimer = OS.setTimeout(() => {
           resizeTimer = null;
+          drawnSize = OS.ttyGetWinSize().join("x");
           if (isFullScreen) renderFullscreen().catch(() => {});
           else renderPage(true);
         }, 150);
@@ -764,8 +865,8 @@ export class GalleryView {
     });
 
     } finally {
+      if (!this.isKitty) OS.signal(SIGWINCH, null);
       if (this.ueberzug) {
-        OS.signal(SIGWINCH, null);
         this.ueberzug.stop();
         this.ueberzug = null;
       }

@@ -78,9 +78,14 @@ function writeAtomic(path, content) {
   OS.rename(tmp, path);
 }
 
-/** iTerm2 inline image escape for a base64 payload */
+/**
+ * iTerm2 inline image escape for a base64 payload. columns x rows must
+ * already be the image's own aspect-fitted cell box (see fitImageInBox):
+ * WezTerm only honours the width when preserveAspectRatio=1, iTerm2 fits
+ * into both. doNotMoveCursor=1 is a WezTerm extension (ignored elsewhere).
+ */
 export function itermEscape(b64, byteSize, columns, rows) {
-  return `\x1b]1337;File=inline=1;size=${byteSize};width=${columns};height=${rows};preserveAspectRatio=1:${b64}\x07`;
+  return `\x1b]1337;File=inline=1;size=${byteSize};width=${columns};height=${rows};preserveAspectRatio=1;doNotMoveCursor=1:${b64}\x07`;
 }
 
 /**
