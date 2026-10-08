@@ -8,6 +8,7 @@ import WallpaperManager from "./wallpaper/WallpaperManager.js";
 import { UserInterface } from "./ui/UserInterface.js";
 import { testExtensions } from "./extensions/ExtensionHandler.js";
 import { checkForUpdate } from "./core/utils/app.js";
+import { getImageProtocol } from "./ui/terminalImage.js";
 
 class WallRizz {
   constructor() {
@@ -19,6 +20,7 @@ class WallRizz {
   async run() {
     try {
       this.handleShowKeymaps();
+      this.handleWhichImageProtocol();
       await this.handleRunUpdate();
       await this.handleExtensionTest();
       await this.handleThemeExtensionScriptDownload();
@@ -61,6 +63,13 @@ class WallRizz {
   handleShowKeymaps() {
     if (!this.config.showKeyMap) return;
     UserInterface.printKeyMaps();
+    throw EXIT;
+  }
+
+  handleWhichImageProtocol() {
+    if (!this.config.whichImageProtocol) return;
+    const { protocol, terminal, source } = getImageProtocol(this.config);
+    print(`protocol=${protocol} terminal=${terminal} (${source})`);
     throw EXIT;
   }
 

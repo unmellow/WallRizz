@@ -38,6 +38,8 @@ export function parseArguments() {
     inspection: "--inspection",
     test: "--test",
     update: "--update",
+    imageProtocol: "--image-protocol",
+    whichImageProtocol: "--which-image-protocol",
   };
 
   // Define and parse command-line arguments using the 'arg' library
@@ -156,6 +158,16 @@ export function parseArguments() {
       [argNames.update]: arg
         .flag()
         .desc("Update WallRizz"),
+      [argNames.imageProtocol]: arg
+        .str("auto")
+        .env("WALLRIZZ_IMAGE_PROTOCOL")
+        .enum(["auto", "kitty", "iterm", "sixel", "symbols"])
+        .desc(
+          "Image preview protocol. 'auto' detects the terminal (kitty/ghostty: kitty, WezTerm/iTerm2: iterm, foot: sixel, Alacritty/unknown: symbols).",
+        ),
+      [argNames.whichImageProtocol]: arg
+        .flag(false)
+        .desc("Print the detected image protocol and exit."),
       "-d": argNames.wallpapersDirectory,
       "-r": argNames.setRandomWallpaper,
       "-s": argNames.imageSize,
@@ -175,6 +187,7 @@ export function parseArguments() {
       "-o": argNames.hold,
       "-x": argNames.processLimit,
       "-i": argNames.inspection,
+      "-P": argNames.imageProtocol,
     })
     .ex([
       [

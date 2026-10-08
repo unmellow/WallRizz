@@ -1,4 +1,4 @@
-import { OS, STD, execAsync, EXIT } from "../core/constants.js";
+import { OS, STD, execAsync, EXIT, HOME_DIR } from "../core/constants.js";
 import {
   clearTerminal,
   cursorHide,
@@ -10,6 +10,7 @@ import {
   exitAlternativeScreen,
 } from "../../helpers/cursor.js";
 import { handleKeysPress, keySequences } from "../../helpers/terminal.js";
+import { positionOutput, renderWithChafa } from "./terminalImage.js";
 
 export class GalleryView {
   constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath, onFocus) {
@@ -19,6 +20,10 @@ export class GalleryView {
     this.handleSelection = handleSelection;
     this.getWallpaperPath = getWallpaperPath;
     this.onFocusCallback = onFocus;
+    // "kitty" keeps the original native kitty graphics path untouched;
+    // everything else (iterm, sixel, symbols) is drawn with chafa.
+    this.protocol = config.resolvedImageProtocol ?? "kitty";
+    this.isKitty = this.protocol === "kitty";
   }
 
   async render() {
@@ -102,6 +107,9 @@ export class GalleryView {
   }
 
   async renderImage(pngSource, size, position, sourceRect) {
+    if (!this.isKitty) {
+      return this.renderImageChafa(pngSource, size, position, sourceRect);
+    }
     const tempFile = pngSource.filePath.endsWith(".png")
       ? pngSource.filePath
       : `/tmp/${pngSource.filePath.split("/").at(-1)}.png`;
@@ -139,6 +147,44 @@ export class GalleryView {
 
     const escapeSequence = `\x1b_G${params};${encodedPath}\x1b\\`;
     STD.out.puts(escapeSequence);
+    STD.out.flush();
+  }
+
+  /**
+   * Non-kitty path: draw with chafa (iterm / sixel / symbols) at a cell.
+   * Zoom/pan is done by pre-cropping with ImageMagick.
+   */
+  async renderImageChafa(pngSource, size, position, sourceRect) {
+    let filePath = pngSource.filePath;
+    if (
+      sourceRect && sourceRect.w && sourceRect.h &&
+      (sourceRect.x > 0 || sourceRect.y > 0 ||
+        (this._fullW && sourceRect.w < this._fullW) ||
+        (this._fullH && sourceRect.h < this._fullH))
+    ) {
+      const cropFile = `${HOME_DIR}/.cache/WallRizz/fullscreen-crop.png`;
+      await execAsync([
+        "magick",
+        filePath,
+        "-crop",
+        `${Math.round(sourceRect.w)}x${Math.round(sourceRect.h)}+${
+          Math.round(sourceRect.x ?? 0)
+        }+${Math.round(sourceRect.y ?? 0)}`,
+        "+repage",
+        cropFile,
+      ]);
+      filePath = cropFile;
+    }
+
+    const output = await renderWithChafa(
+      this.protocol,
+      filePath,
+      size?.columns ?? 20,
+      size?.rows ?? 10,
+    );
+    const x = position?.row ?? 0;
+    const y = position?.column ?? 1;
+    STD.out.puts(positionOutput(this.protocol, output, x, y));
     STD.out.flush();
   }
 
@@ -188,7 +234,45 @@ export class GalleryView {
 
     const label = () => currentHighlight === "fill" ? "█" : " ";
 
+    // Last highlighted cell (non-kitty path only).
+    let highlightedCell = null;
+
+    const frameOf = (cellIndex, chars) => {
+      const [x, y, w, h] = coordinates[cellIndex];
+      const drawW = Math.floor(w);
+      const drawH = Math.floor(h);
+      if (drawW <= 1 || drawH <= 1) return "";
+      const [hz, vt, tl, tr, bl, br] = chars;
+      let out = cursorTo(x, y) + tl + hz.repeat(drawW - 2) + tr;
+      for (let i = 1; i < drawH - 1; i++) {
+        out += cursorTo(x, y + i) + vt + cursorTo(x + drawW - 1, y + i) + vt;
+      }
+      out += cursorTo(x, y + drawH - 1) + bl + hz.repeat(drawW - 2) + br;
+      return out;
+    };
+
+    // With iterm/sixel/symbols the images live in the text layer, so the
+    // kitty-style "erase everything and repaint the highlight" would wipe
+    // them. Instead only the frame of the old/new cell is touched.
+    const renderHighlightCells = (cellIndex) => {
+      if (cellIndex < 0 || cellIndex >= coordinates.length) return;
+      let out = "";
+      if (highlightedCell !== null && highlightedCell !== cellIndex) {
+        out += frameOf(highlightedCell, [" ", " ", " ", " ", " ", " "]);
+      }
+      out += frameOf(
+        cellIndex,
+        currentHighlight === "fill"
+          ? ["█", "█", "█", "█", "█", "█"]
+          : ["─", "│", "╭", "╮", "╰", "╯"],
+      );
+      highlightedCell = cellIndex;
+      STD.out.puts(out);
+      STD.out.flush();
+    };
+
     const renderHighlight = (cellIndex) => {
+      if (!this.isKitty) return renderHighlightCells(cellIndex);
       if (cellIndex < 0 || cellIndex >= coordinates.length) return;
 
       const [x, y, w, h] = coordinates[cellIndex];
@@ -217,8 +301,9 @@ export class GalleryView {
       STD.out.flush();
     };
 
-    const renderPage = async () => {
+    const renderPage = async (skipFocus = false) => {
       STD.out.puts(clearTerminal);
+      highlightedCell = null;
 
       const startIdx = currentPage * maxCellsInGrid;
       const promises = [];
@@ -245,7 +330,7 @@ export class GalleryView {
       renderHighlight(currentCell);
 
       const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
-      if (pngs[globalIndex]) {
+      if (!skipFocus && pngs[globalIndex]) {
         onFocus(pngs[globalIndex], globalIndex);
       }
     };
@@ -295,11 +380,19 @@ export class GalleryView {
       panX = Math.max(0, Math.min(panX, imgWidth - srcW));
       panY = Math.max(0, Math.min(panY, imgHeight - srcH));
 
+      if (!this.isKitty) {
+        // clear the previous frame; keep the last row free so a sixel/iTerm2
+        // image can never scroll the screen
+        STD.out.puts("\x1b[2J");
+        this._fullW = imgWidth;
+        this._fullH = imgHeight;
+      }
+
       // BUG: s/v/w/h source-rect params are ignored by kitty, so pan offsets do nothing.
       // Must pre-crop with magick before transmission.
       return this.renderImage({ filePath }, {
         columns: terminalWidth,
-        rows: terminalHeight,
+        rows: this.isKitty ? terminalHeight : terminalHeight - 1,
       }, { row: originX, column: originY }, {
         x: Math.round(panX),
         y: Math.round(panY),
@@ -324,6 +417,9 @@ export class GalleryView {
           return renderFullscreen();
         }
         print(exitAlternativeScreen);
+        // Pixel images in the text layer are not guaranteed to survive the
+        // alternate screen round trip on every terminal: redraw the page.
+        if (!this.isKitty) await renderPage(true);
       }
     };
 

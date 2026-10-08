@@ -28,6 +28,31 @@ Achieve unparalleled precision with the built-in **ColorJs** library and the opt
 
 Check [wiki](https://github.com/5hubham5ingh/WallRizz/wiki) for more.
 
+# Image previews in any terminal
+
+WallRizz picks an image protocol for the grid and list views automatically, the way [yazi](https://github.com/sxyazi/yazi) does:
+
+| Terminal | Detected via | Protocol |
+| --- | --- | --- |
+| kitty, Ghostty | `TERM=xterm-kitty`/`xterm-ghostty`, `TERM_PROGRAM=ghostty`, `KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR` | `kitty` (native kitty graphics, unchanged) |
+| Konsole | `KONSOLE_VERSION` | `kitty` (untested, override if it misbehaves) |
+| WezTerm, iTerm2, VS Code, Warp, Rio, Tabby, Hyper, mintty | `TERM_PROGRAM`, `WEZTERM_EXECUTABLE`, `ITERM_SESSION_ID`, ... | `iterm` (iTerm2 inline images) |
+| foot, mlterm, Contour, BlackBox, Windows Terminal | `TERM=foot`, `TERM=mlterm`, `WT_SESSION`, ... | `sixel` |
+| xterm, unknown terminals, tmux/screen/zellij | DA1 query (`ESC [ c`) | `sixel` if the terminal reports sixel support, otherwise `symbols` |
+| Alacritty, urxvt, st, Linux console | `TERM`, `ALACRITTY_WINDOW_ID` | `symbols` (coloured Unicode blocks) |
+
+`TERM` is checked first, then `TERM_PROGRAM`, then terminal-specific variables, so a variable leaked from a parent terminal (for example `KITTY_WINDOW_ID` inside foot started from kitty) doesn't win. Inside tmux/screen/zellij, graphics passthrough isn't attempted: you get sixel when the multiplexer advertises it (tmux 3.4+ built with sixel), otherwise symbols.
+
+Every protocol except `kitty` is drawn with [chafa](https://hpjansson.org/chafa/) (`chafa -f iterm|sixels|symbols -s WxH`), so chafa needs to be installed. The list view relies on fzf passing sixel/iTerm2 output from the preview command through to the terminal (fzf >= 0.44; WallRizz already needs >= 0.63 for its footer).
+
+Override the detection with a flag or an environment variable (the flag wins):
+
+```sh
+WallRizz --image-protocol sixel        # or -P sixel; one of auto, kitty, iterm, sixel, symbols
+WALLRIZZ_IMAGE_PROTOCOL=iterm WallRizz
+WallRizz --which-image-protocol        # print what was detected and why, then exit
+```
+
 # Gallery
 
 ## User Interface

@@ -1,5 +1,7 @@
 import { FzfView } from "./FzfView.js";
 import { GalleryView } from "./GalleryView.js";
+import { getImageProtocol } from "./terminalImage.js";
+import { log } from "../core/utils/ui.js";
 
 /**
  * @typedef {import('../core/types.d.ts').WallpapersList} WallpapersList
@@ -34,6 +36,13 @@ class UserInterface {
    * Initialize UI
    */
   async init() {
+    const image = getImageProtocol(this.config);
+    this.config.resolvedImageProtocol = image.protocol;
+    log(
+      `Image protocol: ${image.protocol} (terminal: ${image.terminal}, ${image.source})`,
+      this.config,
+    );
+
     if (this.config.previewMode === "list") {
       const fzfView = new FzfView(
         this.config,
