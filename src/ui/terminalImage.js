@@ -153,21 +153,25 @@ export function getImageProtocol(config) {
       env,
       override: config?.imageProtocol,
       queryDA1,
+      hasUeberzug: () => commandExists("ueberzugpp"),
     });
   } catch (e) {
     throw new SystemError("Invalid image protocol", e.message);
   }
   setTerminalBrand(resolved.terminal);
-  if (
-    (resolved.protocol === "sixel" || resolved.protocol === "symbols") &&
-    !commandExists("chafa")
-  ) {
-    throw new SystemError(
-      `chafa is required to draw images with the "${resolved.protocol}" protocol (${resolved.source}).`,
-      "Install chafa, or force kitty graphics with --image-protocol kitty / WALLRIZZ_IMAGE_PROTOCOL=kitty.",
-    );
+  if (resolved.protocol === "sixel" || resolved.protocol === "symbols") {
+    requireChafa(resolved.protocol, resolved.source);
   }
   return resolved;
+}
+
+/** Throw a helpful error when chafa is needed but missing. */
+export function requireChafa(protocol, why) {
+  if (commandExists("chafa")) return;
+  throw new SystemError(
+    `chafa is required to draw images with the "${protocol}" protocol (${why}).`,
+    "Install chafa (or ueberzugpp), or force kitty graphics with --image-protocol kitty / WALLRIZZ_IMAGE_PROTOCOL=kitty.",
+  );
 }
 
 function passthroughNoneNeeded(env) {

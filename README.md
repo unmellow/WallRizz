@@ -50,8 +50,10 @@ WallRizz picks an image protocol for the grid and list views automatically, the 
 | Konsole | `KONSOLE_VERSION` | `kitty` (untested, override if it misbehaves) |
 | WezTerm, iTerm2, VS Code, Warp, Rio, Tabby, Hyper, mintty | `TERM_PROGRAM`, `WEZTERM_EXECUTABLE`, `ITERM_SESSION_ID`, ... | `iterm` (iTerm2 inline images) |
 | foot, mlterm, Contour, BlackBox, Windows Terminal | `TERM=foot`, `TERM=mlterm`, `WT_SESSION`, ... | `sixel` |
-| xterm, unknown terminals, tmux/screen/zellij | DA1 query (`ESC [ c`) | `sixel` if the terminal reports sixel support, otherwise `symbols` |
-| Alacritty, urxvt, st, Linux console | `TERM`, `ALACRITTY_WINDOW_ID` | `symbols` (coloured Unicode blocks) |
+| xterm, unknown terminals, tmux/screen/zellij | DA1 query (`ESC [ c`) | `sixel` if the terminal reports sixel support, otherwise `ueberzug` or `symbols` (see below) |
+| Alacritty, urxvt, st, Linux console | `TERM`, `ALACRITTY_WINDOW_ID` | `ueberzug` if [Überzug++](https://github.com/jstkdng/ueberzugpp) can be used, otherwise `symbols` (coloured Unicode blocks) |
+
+Whenever detection ends at `symbols` outside tmux/screen/zellij, WallRizz uses `ueberzug` instead if `ueberzugpp` is in `PATH` and there's a canvas for it. Like yazi, that means an X11 session or `DISPLAY` (X11 output), or Wayland on sway, Hyprland, Wayfire or niri (Wayland output). Other Wayland compositors such as GNOME and KDE keep `symbols`; force it with `-P ueberzug` and `WALLRIZZ_UEBERZUG_OUTPUT=x11|wayland` if you want to try. If `ueberzugpp` exits right after starting, WallRizz falls back to `symbols`.
 
 `TERM` is checked first, then `TERM_PROGRAM`, then terminal-specific variables, so a variable leaked from a parent terminal (for example `KITTY_WINDOW_ID` inside foot started from kitty) doesn't win. Inside tmux/screen/zellij, graphics passthrough isn't attempted: you get sixel when the multiplexer advertises it (tmux 3.4+ built with sixel), otherwise symbols.
 
@@ -63,12 +65,14 @@ How the non-kitty protocols are drawn:
 
 Speed: tiles are always encoded from the small cached thumbnails (`~/.cache/WallRizz/pic/`), never from the full-size wallpapers. The encoded output is cached in memory and on disk in `~/.cache/WallRizz/tiles/`, keyed by thumbnail, protocol, cell box, cell pixel size (sixel) and encoder options, so going back to a page or relaunching doesn't re-encode. Tiles are encoded in parallel (limited by `-x/--plimit`), drawn as soon as each one is ready, and the next page is encoded in the background. The grid stays responsive while a page is still loading. Fullscreen still uses the full-size wallpaper. Delete `~/.cache/WallRizz/tiles/` to reclaim the disk space.
 
+`ueberzug` doesn't draw in the terminal at all. WallRizz starts one `ueberzugpp layer --silent -o x11|wayland` and sends it JSON commands on a pipe, the same way yazi does (`{"action":"add","identifier":...,"x":..,"y":..,"max_width":..,"max_height":..,"path":<thumbnail>}` and `{"action":"remove",...}`). Überzug++ shows each thumbnail in its own window placed over the terminal cells, so Alacritty or any other terminal on X11 or a supported Wayland compositor shows real images. All overlays are removed before a page change, when fullscreen is toggled, on zoom/pan, on terminal resize (they're put back once it settles) and on exit, including Ctrl+C, SIGTERM and SIGHUP. `ueberzugpp` is stopped on exit. It also exits by itself when WallRizz dies, because its stdin pipe closes. In the list view the preview command sends `ueberzugpp cmd -s <socket> -a add ...` to the same process, over fzf's preview window.
+
 The list view runs `WallRizz --render-tile` as fzf's preview command, which uses the same cache. It relies on fzf passing sixel/iTerm2 output from the preview command through to the terminal (fzf >= 0.44; WallRizz already needs >= 0.63 for its footer).
 
 Override the detection with a flag or an environment variable (the flag wins):
 
 ```sh
-WallRizz --image-protocol sixel        # or -P sixel; one of auto, kitty, iterm, sixel, symbols
+WallRizz --image-protocol sixel        # or -P sixel; one of auto, kitty, iterm, sixel, symbols, ueberzug
 WALLRIZZ_IMAGE_PROTOCOL=iterm WallRizz
 WallRizz --which-image-protocol        # print what was detected and why, then exit
 ```

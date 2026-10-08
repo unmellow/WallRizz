@@ -7,6 +7,10 @@ import {
   detectBrand,
   normalizeProtocol,
   resolveImageProtocol,
+  ueberzugAdd,
+  ueberzugOutput,
+  ueberzugRemove,
+  ueberzugSocketPath,
 } from "../src/ui/imageProtocol.js";
 
 let failed = 0;
@@ -141,6 +145,51 @@ eq(
   chafaArgs("symbols", 10, 5, { COLORTERM: "truecolor" }, { symbolOptions: ["--work", "9"] }).slice(-4),
   ["-c", "full", "--work", "9"],
 );
+
+// --- Überzug++ ---
+const uz = (env, { override, da1 = null, has = true } = {}) =>
+  resolveImageProtocol({ env, override, queryDA1: () => da1, hasUeberzug: () => has });
+const X = { DISPLAY: ":0" };
+const SWAY = { WAYLAND_DISPLAY: "wayland-1", SWAYSOCK: "/run/sway.sock" };
+eq("normalize ueberzug", normalizeProtocol("ueberzug"), "ueberzug");
+eq("normalize ueberzugpp", normalizeProtocol("UeberzugPP"), "ueberzug");
+eq("uz output x11", ueberzugOutput(X), "x11");
+eq("uz output x11 session", ueberzugOutput({ XDG_SESSION_TYPE: "x11", DISPLAY: ":1", WAYLAND_DISPLAY: "w" }), "x11");
+eq("uz output sway", ueberzugOutput(SWAY), "wayland");
+eq("uz output hyprland", ueberzugOutput({ WAYLAND_DISPLAY: "w", HYPRLAND_INSTANCE_SIGNATURE: "x" }), "wayland");
+eq("uz output niri", ueberzugOutput({ WAYLAND_DISPLAY: "w", NIRI_SOCKET: "/s" }), "wayland");
+eq("uz output wayfire", ueberzugOutput({ WAYLAND_DISPLAY: "w", WAYFIRE_SOCKET: "/s" }), "wayland");
+eq("uz output gnome wayland -> none", ueberzugOutput({ WAYLAND_DISPLAY: "w", DISPLAY: ":0", XDG_SESSION_TYPE: "wayland" }), null);
+eq("uz output no display", ueberzugOutput({}), null);
+eq("uz output env override", ueberzugOutput({ WALLRIZZ_UEBERZUG_OUTPUT: "X11" }), "x11");
+eq("uz auto alacritty x11", uz({ TERM: "alacritty", ...X }).protocol, "ueberzug");
+eq("uz auto alacritty x11 output", uz({ TERM: "alacritty", ...X }).ueberzugOutput, "x11");
+eq("uz auto alacritty sway", uz({ TERM: "alacritty", ...SWAY }).ueberzugOutput, "wayland");
+eq("uz auto unknown no sixel", uz({ TERM: "xterm-256color", ...X }).protocol, "ueberzug");
+eq("uz auto unknown with sixel stays sixel", uz({ TERM: "xterm-256color", ...X }, { da1: DA1_SIXEL }).protocol, "sixel");
+eq("uz auto not installed", uz({ TERM: "alacritty", ...X }, { has: false }).protocol, "symbols");
+eq("uz auto no display", uz({ TERM: "alacritty" }).protocol, "symbols");
+eq("uz auto gnome wayland", uz({ TERM: "alacritty", WAYLAND_DISPLAY: "w", DISPLAY: ":0" }).protocol, "symbols");
+eq("uz auto in tmux", uz({ TERM: "tmux-256color", TMUX: "/tmp/t", ...X }).protocol, "symbols");
+eq("uz auto foot keeps sixel", uz({ TERM: "foot", ...SWAY }).protocol, "sixel");
+eq("uz auto wezterm keeps iterm", uz({ TERM_PROGRAM: "WezTerm", ...X }).protocol, "iterm");
+eq("uz auto kitty keeps kitty", uz({ TERM: "xterm-kitty", ...X }).protocol, "kitty");
+eq("uz forced symbols stays symbols", uz({ TERM: "alacritty", ...X }, { override: "symbols" }).protocol, "symbols");
+eq("uz forced", uz({ TERM: "foot", ...SWAY }, { override: "ueberzug" }).protocol, "ueberzug");
+eq("uz forced env", uz({ TERM: "foot", WALLRIZZ_IMAGE_PROTOCOL: "ueberzug", ...X }).ueberzugOutput, "x11");
+eq("uz forced gnome wayland guesses wayland", uz({ WAYLAND_DISPLAY: "w" }, { override: "ueberzug" }).ueberzugOutput, "wayland");
+eq("uz forced nothing guesses x11", uz({}, { override: "ueberzug" }).ueberzugOutput, "x11");
+eq("uz forced without probe hook", resolveImageProtocol({ env: X, override: "ueberzug" }).protocol, "ueberzug");
+eq(
+  "uz add json",
+  ueberzugAdd("wallrizz-tile-0", 3, 2, 36, 11, "/h/.cache/WallRizz/pic/a b\"c.png"),
+  '{"action":"add","identifier":"wallrizz-tile-0","x":3,"y":2,"max_width":36,"max_height":11,"path":"/h/.cache/WallRizz/pic/a b\\\"c.png"}',
+);
+eq("uz add clamps", JSON.parse(ueberzugAdd("i", -1, -2, 0, 0, "p")), { action: "add", identifier: "i", x: 0, y: 0, max_width: 1, max_height: 1, path: "p" });
+eq("uz remove json", ueberzugRemove("wallrizz-tile-3"), '{"action":"remove","identifier":"wallrizz-tile-3"}');
+eq("uz socket default", ueberzugSocketPath({}, 42), "/tmp/ueberzugpp-42.socket");
+eq("uz socket TMPDIR", ueberzugSocketPath({ TMPDIR: "/run/user/1000/" }, 42), "/run/user/1000/ueberzugpp-42.socket");
+eq("uz socket UEBERZUGPP_TMPDIR wins", ueberzugSocketPath({ TMPDIR: "/a", UEBERZUGPP_TMPDIR: "/b" }, 7), "/b/ueberzugpp-7.socket");
 
 log(`imageProtocol tests: ${passed} passed, ${failed} failed`);
 if (failed) {

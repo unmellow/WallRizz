@@ -9,6 +9,7 @@ import { UserInterface } from "./ui/UserInterface.js";
 import { testExtensions } from "./extensions/ExtensionHandler.js";
 import { checkForUpdate } from "./core/utils/app.js";
 import { getImageProtocol } from "./ui/terminalImage.js";
+import { stopAllUeberzug } from "./ui/ueberzug.js";
 import { TileCache } from "./ui/tileCache.js";
 
 class WallRizz {
@@ -92,8 +93,11 @@ class WallRizz {
 
   handleWhichImageProtocol() {
     if (!this.config.whichImageProtocol) return;
-    const { protocol, terminal, source } = getImageProtocol(this.config);
-    print(`protocol=${protocol} terminal=${terminal} (${source})`);
+    const { protocol, terminal, source, ueberzugOutput } = getImageProtocol(
+      this.config,
+    );
+    const canvas = ueberzugOutput ? ` output=${ueberzugOutput}` : "";
+    print(`protocol=${protocol}${canvas} terminal=${terminal} (${source})`);
     throw EXIT;
   }
 
@@ -104,6 +108,7 @@ class WallRizz {
   }
 
   handleExecutionStatus(status) {
+    stopAllUeberzug();
     if (status === EXIT) STD.exit(0);
     if (status instanceof SystemError) {
       status.log(this.config.inspection);

@@ -14,9 +14,19 @@ import {
   handleKeysPressAsync,
   keySequences,
 } from "../../helpers/terminal.js";
-import { positionOutput, queryCellSize, renderWithChafa } from "./terminalImage.js";
+import {
+  getImageProtocol,
+  positionOutput,
+  queryCellSize,
+  renderWithChafa,
+  requireChafa,
+} from "./terminalImage.js";
+import { installUeberzugSignalHandlers, UeberzugLayer } from "./ueberzug.js";
 import { encodeJpegPayload, itermEscape, TileCache } from "./tileCache.js";
 import { getProcessLimit } from "../core/utils/async.js";
+
+// SIGWINCH (28 on Linux, macOS and the BSDs); QuickJS doesn't export it
+const SIGWINCH = 28;
 
 export class GalleryView {
   constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath, onFocus) {
@@ -40,7 +50,23 @@ export class GalleryView {
 
     const [terminalWidth, terminalHeight] = OS.ttyGetWinSize();
 
-    if (!this.isKitty) {
+    if (this.protocol === "ueberzug") {
+      const output = getImageProtocol(this.config).ueberzugOutput ?? "x11";
+      const layer = new UeberzugLayer(output);
+      if (await layer.start()) {
+        this.ueberzug = layer;
+        installUeberzugSignalHandlers(() => {
+          STD.out.puts(exitAlternativeScreen + clearTerminal + cursorShow);
+          STD.out.flush();
+        });
+      } else {
+        // ueberzugpp didn't start (no usable canvas, missing libs...)
+        requireChafa("symbols", "ueberzugpp failed to start");
+        this.protocol = "symbols";
+      }
+    }
+
+    if (!this.isKitty && !this.ueberzug) {
       // sixel tiles depend on the cell pixel size: ask once, before raw mode
       const cellPx = this.protocol === "sixel" ? queryCellSize() : null;
       this.tiles = new TileCache({
@@ -194,6 +220,18 @@ export class GalleryView {
 
     const columns = size?.columns ?? 20;
     const rows = size?.rows ?? 10;
+    if (this.ueberzug) {
+      this.ueberzug.removeAll();
+      this.ueberzug.add(
+        "wallrizz-fullscreen",
+        position?.row ?? 0,
+        (position?.column ?? 1) - 1,
+        columns,
+        rows,
+        filePath,
+      );
+      return;
+    }
     let output;
     if (this.protocol === "iterm") {
       // compressed JPEG instead of chafa's uncompressed TIFF
@@ -340,7 +378,36 @@ export class GalleryView {
     // waiting so keys stay responsive; stale tiles of a previous page are
     // never drawn (generation check) and their pending encodes are dropped.
     let pageGeneration = 0;
+    const ueberzug = this.ueberzug;
+    // Überzug++: the overlays are separate windows, so every overlay of the
+    // old page is removed before the new page's tiles are added.
+    const renderPageOverlays = (skipFocus = false) => {
+      ueberzug.removeAll();
+      STD.out.puts(clearTerminal);
+      highlightedCell = null;
+      ++pageGeneration;
+      renderHighlight(currentCell);
+      const startIdx = currentPage * maxCellsInGrid;
+      for (let i = 0; i < maxCellsInGrid && startIdx + i < pngs.length; i++) {
+        const box = tileBox(i);
+        // ueberzug cells are 0-based, cursorTo rows are 1-based
+        ueberzug.add(
+          `wallrizz-tile-${i}`,
+          box.x,
+          box.y - 1,
+          box.columns,
+          box.rows,
+          pngs[startIdx + i].filePath,
+        );
+      }
+      const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
+      if (!skipFocus && pngs[globalIndex]) {
+        onFocus(pngs[globalIndex], globalIndex);
+      }
+    };
+
     const renderPageTiles = (skipFocus = false) => {
+      if (ueberzug) return renderPageOverlays(skipFocus);
       STD.out.puts(clearTerminal);
       highlightedCell = null;
       const generation = ++pageGeneration;
@@ -491,6 +558,8 @@ export class GalleryView {
     const toggleFullscreen = async () => {
       const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
       if (pngs[globalIndex]) {
+        // no overlay may outlive the view it belongs to
+        this.ueberzug?.removeAll();
         this.fullscreen = !isFullScreen;
         if (isFullScreen = !isFullScreen) {
           print(enterAlternativeScreen);
@@ -608,9 +677,25 @@ export class GalleryView {
     };
 
     const handleExit = (_, exit) => {
+      this.ueberzug?.removeAll();
       if (isFullScreen) print(exitAlternativeScreen);
       exit();
     };
+
+    // Überzug++ overlays don't move with the text: on resize drop them all
+    // and put them back once the resizing settles.
+    let resizeTimer = null;
+    if (ueberzug) {
+      OS.signal(SIGWINCH, () => {
+        ueberzug.removeAll();
+        if (resizeTimer) OS.clearTimeout(resizeTimer);
+        resizeTimer = OS.setTimeout(() => {
+          resizeTimer = null;
+          if (isFullScreen) renderFullscreen().catch(() => {});
+          else renderPage(true);
+        }, 150);
+      });
+    }
 
     // kitty keeps the original blocking key reader; the other protocols need
     // the event loop to keep running between keys (progressive tiles,
@@ -679,6 +764,11 @@ export class GalleryView {
     });
 
     } finally {
+      if (this.ueberzug) {
+        OS.signal(SIGWINCH, null);
+        this.ueberzug.stop();
+        this.ueberzug = null;
+      }
       STD.out.puts(clearTerminal);
       print(cursorShow);
     }

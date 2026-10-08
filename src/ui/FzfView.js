@@ -3,7 +3,13 @@ import { ProcessSync } from "../../qjs-ext-lib/src/process.js";
 import Fzf from "../../helpers/fzf.js";
 import { Theme } from "../theme/ThemeManager.js";
 import { STD, SystemError, EXIT, OS } from "../core/constants.js";
-import { getTerminalBrand, queryCellSize } from "./terminalImage.js";
+import {
+  getImageProtocol,
+  getTerminalBrand,
+  queryCellSize,
+  requireChafa,
+} from "./terminalImage.js";
+import { UeberzugLayer } from "./ueberzug.js";
 
 export class FzfView {
   constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath) {
@@ -40,9 +46,22 @@ export class FzfView {
     const kittyPreviewCmd =
       "--preview='printf \"\\x1b[0;0H\\x1b_Ga=T,t=f,f=100,q=2,c=${FZF_PREVIEW_COLUMNS};`echo -e {} | head -n 2 | tail -n 1`\\x1b\\\\\" >> /dev/tty'";
 
-    const protocol = this.config.resolvedImageProtocol ?? "kitty";
+    let protocol = this.config.resolvedImageProtocol ?? "kitty";
+    let ueberzug = null;
+    if (protocol === "ueberzug") {
+      ueberzug = new UeberzugLayer(
+        getImageProtocol(this.config).ueberzugOutput ?? "x11",
+      );
+      if (!(await ueberzug.start())) {
+        ueberzug = null;
+        requireChafa("symbols", "ueberzugpp failed to start");
+        protocol = "symbols";
+      }
+    }
     const previewCmd = protocol === "kitty"
       ? kittyPreviewCmd
+      : ueberzug
+      ? this.ueberzugPreviewCmd(ueberzug.socketPath())
       : this.chafaPreviewCmd(protocol);
 
     const fzf = new Fzf();
@@ -95,6 +114,10 @@ export class FzfView {
       })
       .join("\0");
 
+    // the preview overlay is added through the socket by the preview
+    // command; register it so stopping the layer removes it too
+    ueberzug?.shown.add("wallrizz-preview");
+
     const previewer = new ProcessSync(
       fzf.toString(),
       {
@@ -106,12 +129,15 @@ export class FzfView {
     try {
       previewer.run();
     } catch (error) {
+      ueberzug?.stop();
       throw new SystemError(
         "Failed to run fzf.",
         "Make sure fzf is installed and available in the system.",
         error,
       );
     }
+    // fzf is gone (selection, Esc or Ctrl+C): drop the preview overlay
+    ueberzug?.stop();
 
     if (!previewer.success) {
       STD.exit();
@@ -141,6 +167,17 @@ export class FzfView {
     const env = `WALLRIZZ_TERMINAL=${getTerminalBrand()}` +
       (cellPx ? ` WALLRIZZ_CELL_PX=${cellPx}` : "");
     return `--preview='f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d); ${env} "${bin}" -P ${protocol} --render-tile "$f" </dev/tty 2>/dev/null'`;
+  }
+
+  /**
+   * Überzug++ preview: WallRizz keeps one `ueberzugpp layer` running (fed on
+   * a pipe, so it dies with WallRizz) and the preview command tells it,
+   * through its socket, to show the thumbnail over fzf's preview window
+   * (same approach as the lf/fzf ueberzugpp scripts). Re-adding the same
+   * identifier replaces the previous image.
+   */
+  ueberzugPreviewCmd(socket) {
+    return `--preview='f=$(echo -e {} | head -n 2 | tail -n 1 | tr -d " " | base64 -d); ueberzugpp cmd -s "${socket}" -i wallrizz-preview -a add -x "$FZF_PREVIEW_LEFT" -y "$FZF_PREVIEW_TOP" --max-width "$FZF_PREVIEW_COLUMNS" --max-height "$FZF_PREVIEW_LINES" -f "$f" >/dev/null 2>&1'`;
   }
 
   toBase64(str) {

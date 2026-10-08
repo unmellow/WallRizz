@@ -174,9 +174,9 @@ export function parseArguments() {
       [argNames.imageProtocol]: arg
         .str("auto")
         .env("WALLRIZZ_IMAGE_PROTOCOL")
-        .enum(["auto", "kitty", "iterm", "sixel", "symbols"])
+        .enum(["auto", "kitty", "iterm", "sixel", "symbols", "ueberzug"])
         .desc(
-          "Image preview protocol. 'auto' detects the terminal (kitty/ghostty: kitty, WezTerm/iTerm2: iterm, foot: sixel, Alacritty/unknown: symbols).",
+          "Image preview protocol. 'auto' detects the terminal (kitty/ghostty: kitty, WezTerm/iTerm2: iterm, foot: sixel, Alacritty/unknown: ueberzug if ueberzugpp is installed, else symbols).",
         ),
       [argNames.whichImageProtocol]: arg
         .flag(false)

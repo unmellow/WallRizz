@@ -38,6 +38,7 @@ test: quickjs/qjs
 	rm -rf /tmp/wallrizz-tile-home && mkdir -p /tmp/wallrizz-tile-home
 	magick -size 320x180 plasma:fractal -depth 8 /tmp/wallrizz-tile-home/thumb.png
 	HOME=/tmp/wallrizz-tile-home quickjs/qjs --std --module tests/tileCache.test.js /tmp/wallrizz-tile-home/thumb.png
+	quickjs/qjs --std --module tests/ueberzug.test.js tests/mock-ueberzugpp /tmp/wallrizz-ueberzug-test.log
 
 install: src/WallRizz
 	install -Dm755 src/WallRizz "$(DESTDIR)$(BINDIR)/WallRizz"

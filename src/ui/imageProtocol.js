@@ -6,18 +6,23 @@
  *   - "iterm"   : iTerm2 inline images (OSC 1337), drawn with `chafa -f iterm`
  *   - "sixel"   : DEC sixel, drawn with `chafa -f sixels`
  *   - "symbols" : unicode block/colour symbols, drawn with `chafa -f symbols`
+ *   - "ueberzug": Überzug++ (`ueberzugpp layer`) draws real images in a child
+ *                 X11/Wayland window over the terminal (any terminal, no
+ *                 terminal graphics support needed)
  *
  * Resolution order:
  *   1. explicit override: --image-protocol / WALLRIZZ_IMAGE_PROTOCOL (anything but "auto")
  *   2. terminal multiplexer (tmux/screen/zellij) -> DA1 probe: sixel if advertised, else symbols
  *   3. env based brand detection (TERM, then TERM_PROGRAM, then terminal specific vars)
  *   4. unknown terminal / plain xterm -> DA1 probe: sixel if advertised, else symbols
+ *   5. whenever 2-4 end at "symbols" outside a multiplexer, and ueberzugpp is
+ *      installed with a usable X11/Wayland canvas -> ueberzug
  *
  * The detection functions are pure (they take an env object and an optional
  * DA1 probe callback) so they can be unit tested without a terminal.
  */
 
-export const PROTOCOLS = ["kitty", "iterm", "sixel", "symbols"];
+export const PROTOCOLS = ["kitty", "iterm", "sixel", "symbols", "ueberzug"];
 export const PROTOCOL_CHOICES = ["auto", ...PROTOCOLS];
 
 const ALIASES = {
@@ -35,6 +40,9 @@ const ALIASES = {
   chafa: "symbols",
   text: "symbols",
   ascii: "symbols",
+  ueberzug: "ueberzug",
+  ueberzugpp: "ueberzug",
+  "ueberzug++": "ueberzug",
 };
 
 /**
@@ -188,6 +196,37 @@ export function da1HasSixel(response) {
   return match[1].split(";").includes("4");
 }
 
+/** Wayland compositors Überzug++ has a canvas for (same list as yazi). */
+const UEBERZUG_WAYLAND_VARS = [
+  "SWAYSOCK",
+  "HYPRLAND_INSTANCE_SIGNATURE",
+  "WAYFIRE_SOCKET",
+  "NIRI_SOCKET",
+];
+
+/**
+ * Pick the Überzug++ output (`ueberzugpp layer -o ...`), following yazi:
+ * an X11 session or a plain X display -> "x11"; Wayland -> "wayland" on
+ * compositors ueberzugpp supports (sway, Hyprland, Wayfire, niri). Other
+ * Wayland compositors (GNOME, KDE, ...) -> null (ueberzugpp can't place a
+ * window over a native Wayland terminal there).
+ * WALLRIZZ_UEBERZUG_OUTPUT overrides (x11, wayland, ...).
+ *
+ * @param {Record<string,string>} env
+ * @returns {string|null}
+ */
+export function ueberzugOutput(env) {
+  if (has(env, "WALLRIZZ_UEBERZUG_OUTPUT")) {
+    return String(env.WALLRIZZ_UEBERZUG_OUTPUT).trim().toLowerCase();
+  }
+  if (env.XDG_SESSION_TYPE === "x11" && has(env, "DISPLAY")) return "x11";
+  if (has(env, "WAYLAND_DISPLAY")) {
+    return UEBERZUG_WAYLAND_VARS.some((name) => has(env, name)) ? "wayland" : null;
+  }
+  if (has(env, "DISPLAY")) return "x11";
+  return null;
+}
+
 /**
  * Resolve the image protocol.
  *
@@ -195,9 +234,35 @@ export function da1HasSixel(response) {
  * @param {Record<string,string>} opts.env - environment variables
  * @param {string} [opts.override] - value of --image-protocol (may be "auto")
  * @param {() => (string|null)} [opts.queryDA1] - returns raw DA1 response or null
- * @returns {{protocol: string, terminal: string, source: string}}
+ * @param {() => boolean} [opts.hasUeberzug] - whether `ueberzugpp` is in PATH
+ * @returns {{protocol: string, terminal: string, source: string, ueberzugOutput?: string}}
  */
-export function resolveImageProtocol({ env, override, queryDA1 }) {
+export function resolveImageProtocol({ env, override, queryDA1, hasUeberzug }) {
+  const result = resolveBaseProtocol({ env, override, queryDA1 });
+  if (result.protocol === "ueberzug") {
+    // forced: use the detected canvas, or guess from what's there
+    result.ueberzugOutput = ueberzugOutput(env) ??
+      (has(env, "WAYLAND_DISPLAY") ? "wayland" : "x11");
+    return result;
+  }
+  if (
+    result.protocol === "symbols" && result.terminal !== "override" &&
+    !detectMultiplexer(env)
+  ) {
+    const output = ueberzugOutput(env);
+    if (output && hasUeberzug?.()) {
+      return {
+        protocol: "ueberzug",
+        terminal: result.terminal,
+        source: `${result.source}; ueberzugpp found (${output} canvas)`,
+        ueberzugOutput: output,
+      };
+    }
+  }
+  return result;
+}
+
+function resolveBaseProtocol({ env, override, queryDA1 }) {
   const wanted = normalizeProtocol(override ?? env.WALLRIZZ_IMAGE_PROTOCOL);
   if (wanted === null) {
     throw new Error(
@@ -330,4 +395,37 @@ export function chafaArgs(protocol, columns, rows, env, opts = {}) {
   }
   if (opts.passthroughNone) args.push("--passthrough", "none");
   return args;
+}
+
+/**
+ * Überzug++ JSON commands (one per line on `ueberzugpp layer` stdin), same
+ * shape yazi sends. x/y are 0-based terminal cells; the image is scaled to
+ * fit max_width x max_height cells keeping its aspect ratio.
+ */
+export function ueberzugAdd(identifier, x, y, maxWidth, maxHeight, path) {
+  return JSON.stringify({
+    action: "add",
+    identifier,
+    x: Math.max(0, Math.round(x)),
+    y: Math.max(0, Math.round(y)),
+    max_width: Math.max(1, Math.round(maxWidth)),
+    max_height: Math.max(1, Math.round(maxHeight)),
+    path,
+  });
+}
+
+export function ueberzugRemove(identifier) {
+  return JSON.stringify({ action: "remove", identifier });
+}
+
+/**
+ * Socket of a running `ueberzugpp layer` (it always listens on one, also in
+ * stdin mode): $UEBERZUGPP_TMPDIR, else the C++ temp dir ($TMPDIR, $TMP,
+ * $TEMP, $TEMPDIR, /tmp), + /ueberzugpp-<pid>.socket.
+ */
+export function ueberzugSocketPath(env, pid) {
+  const dir = ["UEBERZUGPP_TMPDIR", "TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+    .map((name) => env[name])
+    .find((value) => value) ?? "/tmp";
+  return `${dir.replace(/\/+$/, "") || "/"}/ueberzugpp-${pid}.socket`;
 }

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Mock Überzug++ for tests: records argv and every stdin line to $MOCK_UZ_LOG.
+# MOCK_UZ_FAIL=1: exit at once (ueberzugpp can't start)
+# MOCK_UZ_HANG=1: ignore SIGTERM and stdin EOF (forces SIGKILL on stop)
+log=${MOCK_UZ_LOG:-/tmp/mock-ueberzugpp.log}
+echo "ARGV $*" >> "$log"
+[[ -n $MOCK_UZ_FAIL ]] && exit 1
+if [[ -n $MOCK_UZ_HANG ]]; then
+  trap '' TERM
+  while :; do sleep 0.05; done
+fi
+trap 'echo "SIGTERM" >> "$log"; exit 0' TERM
+while IFS= read -r line; do echo "CMD $line" >> "$log"; done
+echo "EOF" >> "$log"
