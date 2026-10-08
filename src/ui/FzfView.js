@@ -48,7 +48,8 @@ export class FzfView {
     const fzf = new Fzf();
     fzf.color("16,current-bg:-1")
       .read0()
-      .delimiter("' '")
+      // one field per line, so names with spaces show (and match) in full
+      .delimiter("'\\n'")
       .withNth("1")
       .previewWindow(
         `wrap,border-none,left,${(this.config.imageSize[0] + 2) * 2}`,
@@ -67,8 +68,11 @@ export class FzfView {
 
     const fzfInput = Object.entries(wallColors)
       .map(([wallpaperName, palette]) => {
-        const [wpName, id] = wallpaperName.split("#");
-        const name = wpName.includes(" ") ? `"${wpName}"` : wpName;
+        // split on the last "#" so folder/file names containing "#" survive
+        const sep = String(wallpaperName).lastIndexOf("#");
+        const wpName = String(wallpaperName).slice(0, sep);
+        const id = String(wallpaperName).slice(sep + 1);
+        const name = wpName;
 
         const wordLength = Math.floor(maxLineLength / palette.length) || 1;
 

@@ -38,6 +38,8 @@ export function parseArguments() {
     inspection: "--inspection",
     test: "--test",
     update: "--update",
+    recursive: "--recursive",
+    depth: "--depth",
     imageProtocol: "--image-protocol",
     whichImageProtocol: "--which-image-protocol",
   };
@@ -51,6 +53,16 @@ export function parseArguments() {
         .check()
         .map((path) => path.concat("/"))
         .desc("Wallpaper directory path."),
+      [argNames.recursive]: arg
+        .flag(false)
+        .desc("Also search sub directories of the wallpaper directory (hidden ones are skipped)."),
+      [argNames.depth]: arg
+        .num()
+        .min(1)
+        .val("NUM")
+        .desc(
+          "Max directory depth to search, 1 = wallpaper directory only. Implies --recursive. (default: unlimited)",
+        ),
       [argNames.setRandomWallpaper]: arg
         .flag(false)
         .desc("Apply random wallpaper from the directory."),
@@ -188,11 +200,17 @@ export function parseArguments() {
       "-x": argNames.processLimit,
       "-i": argNames.inspection,
       "-P": argNames.imageProtocol,
+      "-R": argNames.recursive,
+      "-D": argNames.depth,
     })
     .ex([
       [
         "-t -d ~/Pictures",
         "Download theme extension scripts.",
+      ],
+      [
+        "-R -D 3 -d ~/Pictures/wallpapers",
+        "Include wallpapers up to two folder levels below the directory.",
       ],
       [
         "-l -d ~/Pictures/wallpapers",

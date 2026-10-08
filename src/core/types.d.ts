@@ -72,6 +72,18 @@ export type UserArguments = {
   /** Run update **/
   update: boolean;
 
+  /** Search sub directories of the wallpaper directory. */
+  recursive: boolean;
+
+  /** Max search depth (1 = wallpaper directory only); implies recursive. */
+  depth?: number;
+
+  /** Image protocol override: auto | kitty | iterm | sixel | symbols. */
+  imageProtocol: "auto" | "kitty" | "iterm" | "sixel" | "symbols";
+
+  /** Print the detected image protocol and exit. */
+  whichImageProtocol: boolean;
+
   /** Thumbnail size **/
   thumbnailSize: string;
 };

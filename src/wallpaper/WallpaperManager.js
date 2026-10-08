@@ -4,6 +4,7 @@ import { UserInterface } from "../ui/UserInterface.js";
 import { notify, log } from "../core/utils/ui.js";
 import { ensureDir } from "../core/utils/io.js";
 import { CacheManager } from "./CacheManager.js";
+import { scanWallpapers } from "./scan.js";
 import { OS, STD, HOME_DIR, EXIT, SystemError } from "../core/constants.js";
 
 export default class WallpaperManager {
@@ -27,37 +28,27 @@ export default class WallpaperManager {
   }
 
   loadWallpapers() {
-    const [imgFiles, error] = OS.readdir(
-      this.config.wallpapersDirectory,
-    );
-    if (error !== 0) {
-      throw new Error(
-        "Failed to read wallpapers directory:\n" +
-          this.config.wallpapersDirectory,
-      );
+    let found;
+    try {
+      found = scanWallpapers(this.config.wallpapersDirectory, {
+        recursive: this.config.recursive || this.config.depth !== undefined,
+        depth: this.config.depth,
+        fs: OS,
+      });
+    } catch (e) {
+      throw new Error(e.message);
     }
-    const wallpapers = imgFiles.filter(
-      (name) =>
-        name !== "." && name !== ".." && this.isSupportedImageFormat(name),
-    ).map((name) => {
-      const [stats, error] = OS.stat(
-        this.config.wallpapersDirectory.concat(name),
-      );
-
-      if (error) {
-        throw new Error(
-          "Failed to read wallpaper stat for:\n" +
-            this.config.wallpapersDirectory.concat(name),
-        );
-      }
-      const { dev, ino } = stats;
-      return {
-        name,
-        uniqueId: `${dev}${ino}`.concat(
-          ".png",
-        ),
-      };
-    });
+    const wallpapers = found.map(({ name, dev, ino }) => ({
+      name,
+      uniqueId: `${dev}${ino}`.concat(".png"),
+    }));
+    log(
+      `Found ${wallpapers.length} wallpaper(s) in ${this.config.wallpapersDirectory}` +
+        (this.config.recursive || this.config.depth !== undefined
+          ? ` (recursive, depth: ${this.config.depth ?? "unlimited"})`
+          : ""),
+      this.config,
+    );
 
     if (!wallpapers.length) {
       throw new SystemError(

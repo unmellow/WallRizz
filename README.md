@@ -28,6 +28,18 @@ Achieve unparalleled precision with the built-in **ColorJs** library and the opt
 
 Check [wiki](https://github.com/5hubham5ingh/WallRizz/wiki) for more.
 
+# Wallpapers in sub folders
+
+By default only the wallpaper directory itself is read. `-R`/`--recursive` also searches its sub folders, and `-D`/`--depth NUM` limits how deep (`--depth` implies `--recursive`; `1` is the directory itself, which is the default behaviour; no depth means unlimited, like `find` without `-maxdepth`):
+
+```sh
+WallRizz -R -d ~/Pictures/wallpapers          # every sub folder
+WallRizz -D 2 -d ~/Pictures/wallpapers        # wallpapers/ and wallpapers/*/ only
+WALLPAPER_DIR=~/Pictures/wallpapers WallRizz -R
+```
+
+Hidden folders (names starting with `.`) are skipped. Symlinked folders are followed, but every real directory is scanned only once, so symlink loops terminate and a folder reachable through both a link and its real path isn't listed twice. Wallpapers in sub folders are shown with their relative path (e.g. `favorites/landscape/sunset.jpg`); thumbnails and colour caches are keyed by device and inode, so files with the same name in different folders don't collide.
+
 # Image previews in any terminal
 
 WallRizz picks an image protocol for the grid and list views automatically, the way [yazi](https://github.com/sxyazi/yazi) does:
