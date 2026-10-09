@@ -147,7 +147,7 @@ export default class Download {
 
     return "curl --parallel --parallel-immediate " +
       escapedFileList.map(([sourceUrl, destPath]) =>
-        `-o "${destPath}" "${sourceUrl}"`
+        `-H "Accept: application/vnd.github.raw" -H "Cache-Control: no-cache" -o "${destPath}" "${sourceUrl}"`
       ).join(" ");
   }
 

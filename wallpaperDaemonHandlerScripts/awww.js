@@ -1,3 +1,4 @@
+// awww-handler 2: calls awww img, no OS.exec probe
 /*
  For:            awww (swww renamed), https://codeberg.org/LGFae/awww
  Author:         https://github.com/unmellow

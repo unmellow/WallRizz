@@ -46,9 +46,9 @@ class ExtensionScriptsDownloader extends Download {
         .then((head) => ({
           name: script.name,
           about: head,
-          // raw.githubusercontent.com/<branch>/... stayed on the broken
-          // awww handler. The blob sha cannot.
-          downloadUrl: blobDownloadUrl(script),
+          // Never raw.githubusercontent.com/<branch>/...: that URL kept
+          // serving the broken awww handler after main had the fix.
+          downloadUrl: script.git_url || script.url || script.download_url,
         }));
 
       promises.push(getScriptPromise);
