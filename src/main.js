@@ -184,3 +184,9 @@ class WallRizz {
 
 const wallRizz = new WallRizz();
 await wallRizz.run();
+// Done (picked, quit): exit now. QuickJS would otherwise keep running until
+// every pending timer and read handler is gone (e.g. a confirmation or
+// thumbnail timer), delaying the exit by seconds.
+stopAllUeberzug();
+STD.out.flush();
+STD.exit(0);

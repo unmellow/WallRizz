@@ -18,28 +18,26 @@
  *             sent
  *
  * ueberzugpp handles commands one by one, so windows appear in the order of
- * the adds: events are matched first in, first out. Every wait has a hard
- * timeout (HARD_TIMEOUT_MS) after which the add counts as up anyway. An add
- * that timed out stays in the queue as a "ghost" for GHOST_MS: its late
- * window must not confirm a newer add (that would remove an old overlay too
- * early). The layer never removes an overlay before its window is up or
- * timed out (ueberzug.js), because a window removed before it is mapped
- * never appears. A ghost that was removed after its timeout may thus never
- * appear: when one heads the queue, a new window is held for up to
- * GHOST_CLOSE_MS. If sway reports it closed meanwhile, it was the ghost's
- * (the remove was already on its way); otherwise it is the next add's.
+ * the adds; its windows carry a random app_id, so pid and order are all an
+ * event can be matched by: an event confirms the oldest add still waiting.
+ * Every add has its own hard timeout (HARD_TIMEOUT_MS): then it counts as
+ * up anyway and leaves the queue, so an add whose window never appears (or
+ * whose event was missed) never holds up a later one. The layer never
+ * removes an overlay before its window is up or timed out (ueberzug.js),
+ * because ueberzugpp drops a window removed before it is mapped. A window
+ * removed after its timeout (or forgotten) may still appear late, or never:
+ * it stays as a "removed" marker for REMOVED_MARK_MS. A new window that
+ * comes while an older marker exists is held for up to GHOST_CLOSE_MS: if
+ * sway reports it closed meanwhile it was the removed one's, otherwise it
+ * confirms the oldest waiting add (and the marker goes).
  */
 import { OS, STD } from "../core/constants.js";
 
 export const HARD_TIMEOUT_MS = 1000;
 export const FALLBACK_MS = 300;
-// a late event of a timed-out / removed add is expected this long
-export const GHOST_MS = 3000;
-// swaymsg prints nothing once subscribed, so the watcher is started
-// before ueberzugpp (which needs far longer to map its first window);
-// adds sent before it was surely up would have their events missed
-const SWAY_READY_MS = 60;
-// a window that may be a removed ghost's: wait this long for its "close"
+// a window removed before it was seen may still appear this long
+export const REMOVED_MARK_MS = 1000;
+// a window that may be a removed one's: wait this long for its "close"
 export const GHOST_CLOSE_MS = 100;
 const HYPR_POLL_MS = 25;
 const APP_PREFIX = "ueberzugpp_";
@@ -213,11 +211,11 @@ export class WindowWatch {
     this.ownerPid = ownerPid;
     this.kind = kind;
     this.parent = parent;
-    this.queue = []; // { id, sentAt, cb, timer, ghostUntil }
+    this.queue = []; // waiting { id, sentAt, cb, timer } / removed markers { until }
+    this.timedOut = new Map(); // id -> entry of a timed-out add (for removedUnseen)
     this.seen = new Set(); // sway container ids / hyprland addresses
     this.child = null;
-    this.readyAt = Infinity;
-    this.held = null; // { cid, timer }: a window that may be a ghost's
+    this.held = null; // { cid, mark, timer }: a window that may be a removed one's
     this.pollTimer = null;
     this.polling = null;
     this.stopped = false;
@@ -225,7 +223,6 @@ export class WindowWatch {
     // (swaymsg prints nothing once subscribed; it is started before
     // ueberzugpp, which needs far longer to map its first window)
     if (kind === "sway") this.startSway();
-    else this.readyAt = -Infinity;
   }
 
   startSway() {
@@ -239,9 +236,7 @@ export class WindowWatch {
     );
     if (!this.child) {
       this.kind = "none";
-      return;
     }
-    this.readyAt = Date.now() + SWAY_READY_MS;
   }
 
   /** the event source went away: everything still waiting uses the fallback */
@@ -249,8 +244,11 @@ export class WindowWatch {
     if (this.stopped || this.kind === "none") return;
     this.child = null;
     this.kind = "none";
+    if (this.held) OS.clearTimeout(this.held.timer);
+    this.held = null;
+    this.queue = this.queue.filter((e) => e.cb);
     for (const e of this.queue) {
-      if (e.cb) this.arm(e, Math.max(0, e.sentAt + FALLBACK_MS - Date.now()), "fallback");
+      this.arm(e, Math.max(0, e.sentAt + FALLBACK_MS - Date.now()), "fallback");
     }
   }
 
@@ -258,11 +256,11 @@ export class WindowWatch {
     const con = ev?.container ?? {};
     if (ev?.change === "close") {
       if (this.held && this.held.cid === con.id) {
-        // the held window was the removed ghost's
+        // the held window was a removed one's: it confirms nothing
         OS.clearTimeout(this.held.timer);
+        const { mark } = this.held;
         this.held = null;
-        this.purge();
-        this.queue.shift();
+        this.drop(mark);
       }
       return;
     }
@@ -275,46 +273,71 @@ export class WindowWatch {
     this.appeared(con.id);
   }
 
-  purge() {
-    const now = Date.now();
-    this.queue = this.queue.filter((e) => e.cb || e.ghostUntil > now);
+  drop(e) {
+    this.queue = this.queue.filter((x) => x !== e);
   }
 
-  /** a window of ours appeared: confirm the oldest add (or eat a ghost) */
+  /** forget removed markers that are past their time */
+  purge() {
+    const now = Date.now();
+    this.queue = this.queue.filter((e) => e.cb || e.until > now);
+  }
+
+  /** a window of ours appeared: confirm the oldest waiting add */
   appeared(cid = null) {
     if (this.held) {
-      // windows come in order: settle the held one first
+      // windows come in order: the held one was the removed one's
       OS.clearTimeout(this.held.timer);
+      const { mark } = this.held;
       this.held = null;
-      this.purge();
-      if (this.queue[0]?.removed && !this.queue[0].cb) this.queue.shift();
+      this.drop(mark);
     }
     this.purge();
-    const e = this.queue[0];
-    if (!e) return;
-    if (!e.cb && e.removed && cid !== null && this.kind === "sway") {
-      // removed ghost: this window is its (a close follows) or the next add's
+    const first = this.queue.findIndex((e) => e.cb);
+    const mark = this.queue.find((e, i) => !e.cb && (first < 0 || i < first));
+    if (mark && first >= 0 && cid !== null && this.kind === "sway") {
+      // this window is the removed one's (a close follows) or the add's
       this.held = {
         cid,
+        mark,
         timer: OS.setTimeout(() => {
           this.held = null;
-          this.queue = this.queue.filter((x) => x !== e); // it never appeared
+          this.drop(mark); // it never appeared
           this.appeared(null);
         }, GHOST_CLOSE_MS),
       };
       return;
     }
-    this.queue.shift();
-    if (e.cb) this.resolve(e, "mapped");
+    if (mark && first < 0) {
+      this.drop(mark); // nothing waits: it was the removed one's
+      return;
+    }
+    if (first < 0) return;
+    const e = this.queue[first];
+    if (mark) this.drop(mark);
+    this.drop(e);
+    this.resolve(e, "mapped");
+  }
+
+  /** keep `e` (no longer waiting) as a removed marker, in add order */
+  mark(e) {
+    e.cb = null;
+    e.until = Date.now() + REMOVED_MARK_MS;
+    this.drop(e);
+    const at = this.queue.findIndex((x) => x.sentAt > e.sentAt);
+    if (at < 0) this.queue.push(e);
+    else this.queue.splice(at, 0, e);
   }
 
   /**
    * The remove of `id` was sent after its add timed out (no window seen):
-   * that window may never appear (see the header).
+   * that window may still appear (and close), or never.
    */
   removedUnseen(id) {
-    const e = this.queue.find((x) => x.id === id && !x.cb);
-    if (e) e.removed = true;
+    const e = this.timedOut.get(id);
+    if (!e) return;
+    this.timedOut.delete(id);
+    if (this.kind !== "none" && !this.stopped) this.mark(e);
   }
 
   resolve(e, how) {
@@ -331,11 +354,11 @@ export class WindowWatch {
     e.timer = OS.setTimeout(() => {
       e.timer = null;
       if (!e.cb) return;
-      if (how === "fallback") {
-        // never confirmed: no event will come for it
-        this.queue = this.queue.filter((x) => x !== e);
-      } else {
-        e.ghostUntil = e.sentAt + GHOST_MS;
+      // its own timeout: it leaves the queue, later adds don't wait on it
+      this.drop(e);
+      if (how === "timeout") {
+        this.timedOut.set(e.id, e);
+        if (this.timedOut.size > 32) this.timedOut.delete(this.timedOut.keys().next().value);
       }
       this.resolve(e, how);
     }, ms);
@@ -347,33 +370,32 @@ export class WindowWatch {
    * ("fallback").
    */
   sent(id, cb) {
-    const now = Date.now();
-    const e = { id, sentAt: now, cb, timer: null, ghostUntil: 0, removed: false };
+    const e = { id, sentAt: Date.now(), cb, timer: null, until: 0 };
+    this.timedOut.delete(id);
     this.queue.push(e);
     if (this.kind === "none") {
       this.arm(e, FALLBACK_MS, "fallback");
       return;
     }
-    // before the subscription is surely up, an event may be missed: the
-    // short fallback, not the hard timeout
-    const early = now < this.readyAt;
-    this.arm(e, early ? FALLBACK_MS : HARD_TIMEOUT_MS, early ? "fallback-early" : "timeout");
+    this.arm(e, HARD_TIMEOUT_MS, "timeout");
     if (this.kind === "hyprland") this.poll();
   }
 
   /**
-   * `id` was removed before its window was confirmed: drop the callback but
-   * keep its place (its window may still appear and must not count for a
-   * newer add).
+   * `id` was removed before its window was confirmed: drop the callback;
+   * its window may still appear (and must not count for a newer add).
    */
   forget(id) {
     const e = this.queue.find((x) => x.id === id && x.cb);
     if (!e) return;
     if (e.timer) OS.clearTimeout(e.timer);
     e.timer = null;
-    e.cb = null;
-    if (this.kind === "none") this.queue = this.queue.filter((x) => x !== e);
-    else e.ghostUntil = e.sentAt + GHOST_MS;
+    if (this.kind === "none") {
+      e.cb = null;
+      this.drop(e);
+    } else {
+      this.mark(e);
+    }
   }
 
   /** adds still waiting for their window */
@@ -416,6 +438,7 @@ export class WindowWatch {
     this.stopped = true;
     for (const e of this.queue) if (e.timer) OS.clearTimeout(e.timer);
     this.queue = [];
+    this.timedOut.clear();
     if (this.held) OS.clearTimeout(this.held.timer);
     this.held = null;
     if (this.pollTimer) OS.clearTimeout(this.pollTimer);

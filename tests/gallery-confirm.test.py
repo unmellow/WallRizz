@@ -6,7 +6,8 @@ delay, one at a time, and a window event goes out), and tests/mock-swaymsg
 (the IPC subscription WallRizz reads). Slow mock magick for cold pages.
 
   A. sway, slow first map (600 ms, like an OpenCV build of ueberzugpp):
-     1. the window subscription runs; a warm-up add goes first
+     1. the window subscription runs; no warm-up add (off by default): the
+        first add is page 0's
      2. first page: each update is sent only after the previous update's
         window was mapped and >= WALLRIZZ_UEBERZUG_SPACING_MS later
         (coalesced: never two adds waiting on one window)
@@ -15,10 +16,16 @@ delay, one at a time, and a window event goes out), and tests/mock-swaymsg
      4. seen-page flips: one add, the old page removed >= the grace after
         the new window was mapped
      5. q: exits, the subscription child is gone, the live dir released
+     6. replaced partials go on their successor's confirmation (~grace
+        after its window), not on the 1 s timeout
   B. sway, windows never reported: the old page goes after the ~1 s timeout
   C. no compositor confirmation: the old page goes 300 ms after the add
   D. ueberzugpp exits right after starting (it is started in the background,
      while the first page is made): chafa symbols, no restart
+  E. the first add's window never appears: it costs only its own timeout;
+     the later adds are confirmed by their own windows
+  F. q / Enter exit fast (no 5 s stall) at start, and while a window
+     confirmation is pending
 usage: gallery-confirm.test.py WALLRIZZ_BIN TESTS_DIR MOCK_MAGICK WORKDIR
 """
 import glob, json, os, pty, shutil, signal, struct, subprocess, sys, time, fcntl, termios
@@ -56,7 +63,7 @@ base_env = dict(os.environ, HOME=home, XDG_CACHE_HOME=xdg_cache, XDG_RUNTIME_DIR
 for k in ("DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM", "MOCK_CHAFA_OLD",
           "WALLRIZZ_UEBERZUG_OVERLAY", "WALLRIZZ_UEBERZUG_DEBOUNCE_MS", "WALLRIZZ_CACHE_MAX_MB",
           "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE", "WALLRIZZ_UEBERZUG_CONFIRM", "WALLRIZZ_UEBERZUG_WARMUP",
-          "MOCK_UZ_NO_MAP", "MOCK_UZ_MAP_MS", "MOCK_UZ_FIRST_MAP_MS", "MOCK_SWAY_EVENTS"):
+          "MOCK_UZ_NO_MAP", "MOCK_UZ_NO_MAP_FIRST", "MOCK_UZ_MAP_MS", "MOCK_UZ_FIRST_MAP_MS", "MOCK_SWAY_EVENTS"):
     base_env.pop(k, None)
 cache = f"{xdg_cache}/WallRizz"
 t = Checks("gallery confirm")
@@ -164,7 +171,8 @@ a.term.pump(0.4)  # (WallRizz reads the window event, removes the partial)
 check("A: window subscription started (swaymsg subscribe window)",
       any("subscribe" in l and "window" in l for l in lines(sway_argv)), str(lines(sway_argv)))
 ev = a.events()
-check("A: the warm-up add goes first", ev and ev[0][1] == "add" and ev[0][2] == "wallrizz-warmup", str(ev[:3]))
+check("A: no warm-up by default: the first add is page 0's", ev and ev[0][1] == "add" and ev[0][2].startswith("wallrizz-p0-"), str(ev[:3]))
+check("A: no warm-up image sent", not any("warmup" in i or "/warmup-" in p for i, p in a.paths()), str(a.paths()[:3]))
 p0 = [e for e in a.adds("wallrizz-p0-")]
 check("A: first page filled in progressively", len(p0) >= 2, str(p0))
 cadence = []
@@ -177,6 +185,20 @@ check("A: each update sent only after the previous update's window was mapped + 
 p0_mapped = sorted(a.first("mapped", e[2]) for e in p0 if a.first("mapped", e[2]))
 burst = [sum(1 for e in p0 if lo < e[0] <= hi) for lo, hi in zip(p0_mapped, p0_mapped[1:])]
 check("A: coalesced (one add per appeared window)", all(n <= 1 for n in burst), str(burst))
+
+
+def confirm_gaps(s, adds):
+    """ms from the successor's window to the removal of the overlay it replaced"""
+    out = []
+    for prev, cur in zip(adds, adds[1:]):
+        m, r = s.first("mapped", cur[2]), s.first("remove", prev[2])
+        out.append(None if m is None or r is None else round((r - m) * 1000))
+    return out
+
+
+gaps = confirm_gaps(a, p0)
+check("A: replaced partials go on confirmation (grace after the window), not the 1 s timeout",
+      gaps and all(g is not None and GRACE_MS - TOL * 1000 <= g <= 300 * SCALE for g in gaps), str(gaps))
 
 # seen flips (page 1 first, cold, then 4 flips between the two seen pages)
 a.term.write(b"L")
@@ -196,7 +218,7 @@ check("A: seen flips: old page removed only after the new window was mapped (+gr
 ev = a.events()
 # every removed page overlay: its replacement (next add of this run) mapped first
 early = []
-page_adds = [e for e in ev if e[1] == "add" and e[2] != "wallrizz-warmup"]
+page_adds = [e for e in ev if e[1] == "add"]
 for i, e in enumerate(page_adds[:-1]):
     r = a.first("remove", e[2])
     nxt = page_adds[i + 1][2]
@@ -214,7 +236,7 @@ check("A: one subscription child while running", len(watch_pids) == 1, str(watch
 check("A: q exits", a.quit(), f"status={a.term.status}")
 time.sleep(0.2)
 check("A: subscription child gone after exit", not any(os.path.exists(f"/proc/{p}") for p in watch_pids), str(watch_pids))
-live = {os.path.dirname(p) for _, p in a.paths() if "/partial-" in p or "/warmup-" in p}
+live = {os.path.dirname(p) for _, p in a.paths() if "/partial-" in p}
 leftover = [f for d in live for f in glob.glob(f"{d}/*-{a.pid}*") + glob.glob(f"{d}/.inst-{a.pid}")]
 check("A: no live file or marker of this run left", not leftover, str(leftover))
 gone_ok = all(not os.path.isdir(d) or glob.glob(f"{d}/.inst-*") for d in live)
@@ -256,4 +278,63 @@ check("D: failed start: symbols notice", d.term.wait_for("the symbols notice", l
 check("D: failed start: tiles drawn with chafa", d.term.wait_for("chafa runs", lambda: bool(lines(chafa_log)[0:1] and lines(chafa_log)[0]), 30))
 check("D: failed start: no restart", len([l for l in lines(d.log) if l.startswith("ARGV")]) == 1, str(lines(d.log)[:3]))
 check("D: q exits", d.quit(), f"status={d.term.status}")
+
+# ---- E. the first add never gets a window ----
+e = Session("e", SWAYSOCK=f"{work}/sway.sock", MOCK_SWAY_EVENTS=events,
+            MOCK_UZ_NO_MAP_FIRST="1", MOCK_UZ_MAP_MS=str(MAP_MS), XDG_CACHE_HOME=f"{work}/xdg-cache-e")
+if not check("E: first page complete", e.term.wait_for("page 0's full composite", lambda: e.full_adds(0), 90)):
+    e.give_up()
+e.term.wait_for("page 0's final window mapped", lambda: e.first("mapped", e.full_adds(0)[-1]) is not None, 10)
+e.term.pump(0.4)
+e0 = e.adds("wallrizz-p0-")
+never = [l.split()[1] for l in lines(e.log) if l.startswith("NEVERMAP ")]
+check("E: the first add never mapped", never and never[0] == e0[0][2], str((never, e0[:1])))
+first_gap = round((e.first("remove", e0[0][2]) - e0[1][0]) * 1000) if len(e0) > 1 and e.first("remove", e0[0][2]) else None
+check("E: the never-mapped overlay waits only its own ~1 s timeout",
+      first_gap is not None and first_gap <= 1000 + 400 * SCALE, str(first_gap))
+gaps = confirm_gaps(e, e0[1:])
+check("E: later adds are confirmed by their own windows (no 1 s timeouts)",
+      all(g is not None and g <= 300 * SCALE for g in gaps), str(gaps))
+e.term.pump(1.2)
+e.term.write(b"L")
+e.term.wait_for("page 1's full composite", lambda: e.full_adds(1), 60)
+e.term.wait_for("page 1 mapped", lambda: e.first("mapped", e.full_adds(1)[-1]) is not None, 10)
+e.term.pump(0.5)
+new, old = flip(e, b"H", 0)
+m, r = e.first("mapped", new), e.first("remove", old)
+check("E: seen flip confirmed by its window", m is not None and r is not None and (r - m) * 1000 <= 300 * SCALE,
+      str((new, old, m, r)))
+check("E: q exits", e.quit(), f"status={e.term.status}")
+
+
+# ---- F. fast exit (no 5 s stall), even with confirmations pending ----
+def exit_time(tag, key, after, **extra):
+    s = Session(tag, SWAYSOCK=f"{work}/sway.sock", MOCK_SWAY_EVENTS=events, **extra)
+    t0 = time.monotonic()
+    if callable(after):
+        s.term.wait_for(f"{tag}: ready to press", after(s), 60)
+    else:
+        s.term.pump(after)
+    pending = None
+    if extra.get("MOCK_UZ_NO_MAP"):
+        pending = bool(s.adds())
+    tq = time.monotonic()
+    s.term.write(key)
+    ok = s.term.wait_exit(f"{tag}: exit", 10)
+    return ok, round(time.monotonic() - tq, 3), round(tq - t0, 3), pending
+
+
+EXIT_S = 0.4 * SCALE
+for tag, key, after, extra in [
+    # (cold cache; as soon as the UI is up: raw mode, cursor hidden; the
+    # pty doesn't answer the cell-size query, which reads keys for 0.5 s)
+    ("f1", b"q", lambda s: (lambda: b"\x1b[?25l" in s.term.out), {"XDG_CACHE_HOME": f"{work}/xdg-cache-f1"}),
+    ("f2", b"q", 1.5, {"XDG_CACHE_HOME": f"{work}/xdg-cache-f2"}),
+    ("f3", b"q", lambda s: (lambda: b"\x1b[?25l" in s.term.out and bool(s.adds())), {"MOCK_UZ_NO_MAP": "1"}),
+    ("f4", b"\r", lambda s: (lambda: b"\x1b[?25l" in s.term.out and bool(s.adds())), {"MOCK_UZ_NO_MAP": "1"}),
+]:
+    ok, took, at, pending = exit_time(tag, key, after, **extra)
+    what = {"f1": "q right after start (cold)", "f2": "q at 1.5 s (cold)", "f3": "q while a confirmation is pending",
+            "f4": "Enter while a confirmation is pending"}[tag]
+    check(f"F: {what}: exits within {EXIT_S:.1f} s", ok and took <= EXIT_S, f"took={took}s at={at}s pending={pending}")
 t.done()

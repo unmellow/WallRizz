@@ -16,6 +16,8 @@
 #                        add removed before its window is due never maps
 #                        (no event), as with the real ueberzugpp
 # MOCK_UZ_NO_MAP=1:      ... except that no window is ever reported
+# MOCK_UZ_NO_MAP_FIRST=N: ... the first N adds never get a window (no event;
+#                        the later ones map as usual)
 log=${MOCK_UZ_LOG:-/tmp/mock-ueberzugpp.log}
 instance=$(grep -c '^ARGV' "$log" 2>/dev/null)
 echo "ARGV $*" >> "$log"
@@ -47,6 +49,11 @@ emit_map() { # id due_us con_id
 while IFS= read -r line; do
   echo "CMD $line" >> "$log"
   if [[ -n $MOCK_SWAY_EVENTS && -z $MOCK_UZ_NO_MAP &&
+        $line =~ \"action\":\"add\",\"identifier\":\"([^\"]+)\" ]] &&
+     (( ${MOCK_UZ_NO_MAP_FIRST:-0} > 0 )); then
+    MOCK_UZ_NO_MAP_FIRST=$(( MOCK_UZ_NO_MAP_FIRST - 1 ))
+    echo "NEVERMAP ${BASH_REMATCH[1]} $EPOCHREALTIME" >> "$log"
+  elif [[ -n $MOCK_SWAY_EVENTS && -z $MOCK_UZ_NO_MAP &&
         $line =~ \"action\":\"add\",\"identifier\":\"([^\"]+)\" ]]; then
     now=$(us)
     if (( maps == 0 )); then due=$(( now + ${MOCK_UZ_FIRST_MAP_MS:-${MOCK_UZ_MAP_MS:-100}} * 1000 ))

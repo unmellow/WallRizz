@@ -77,7 +77,7 @@ export function liveRenderDir(env, fallback, { shm = "/dev/shm", uid = currentUi
 
 /**
  * Remove files left by WallRizz runs that are gone (crash, SIGKILL):
- * partial-<pid>-<n>.png, warmup-<pid>.png and .inst-<pid> whose pid is not
+ * partial-<pid>-<n>.png, warmup-<pid>.png (1.5.0.r13) and .inst-<pid> whose pid is not
  * alive. Only those file patterns, only directly inside `dir`.
  * @param {string} dir
  * @param {number} ownPid

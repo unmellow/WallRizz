@@ -74,17 +74,6 @@ const PARTIAL_KEEP_MS = 1000;
 const UEBERZUG_UP_GRACE_MS = 50;
 // overlay outcomes that mean the window will never be up
 const NEVER_UP = new Set(["cancelled", "removed", "dead", "gone"]);
-// 1x1 transparent PNG: added once at start (page mode) so ueberzugpp's
-// one-time setup (image loader, first window) overlaps the thumbnails
-// instead of delaying the first page. WALLRIZZ_UEBERZUG_WARMUP=0: off
-const WARMUP_PNG = [
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-  0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x00, 0x02, 0x00,
-  0x00, 0x05, 0x00, 0x01, 0x7a, 0x5e, 0xab, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
-  0xae, 0x42, 0x60, 0x82,
-];
-const WARMUP_FILE_MS = 5000;
 const PID = OS.getpid?.() ?? 0;
 // a crashed ueberzugpp is restarted this often per session, then WallRizz
 // falls back to chafa symbols
@@ -164,7 +153,6 @@ export class GalleryView {
     // left behind, and the screen is restored
     installUeberzugSignalHandlers(() => {
       for (const f of this.liveFiles) OS.remove(f);
-      this.dropWarmupFile();
       this.releaseLiveDir();
       STD.out.puts(exitAlternativeScreen + clearTerminal + cursorShow);
       STD.out.flush();
@@ -261,36 +249,10 @@ export class GalleryView {
     const layer = this.newUeberzugLayer(spacingMs);
     if (!commandExists(layer.bin) || !layer.spawn()) return false;
     this.ueberzug = layer;
-    if (this.overlayMode === "page") this.warmUpUeberzug(layer);
     layer.settle().then((ok) => {
       if (!ok) this.onUeberzugDeath(layer, layer.deathReason ?? "exited right after starting");
     });
     return true;
-  }
-
-  /** see WARMUP_PNG */
-  warmUpUeberzug(layer) {
-    if (STD.getenv("WALLRIZZ_UEBERZUG_WARMUP") === "0" || !this.liveDir) return;
-    const path = `${this.liveDir}warmup-${PID}.png`;
-    const fd = OS.open(path, OS.O_WRONLY | OS.O_CREAT | OS.O_TRUNC, 0o600);
-    if (fd < 0) return;
-    const ok = OS.write(fd, new Uint8Array(WARMUP_PNG).buffer, 0, WARMUP_PNG.length) === WARMUP_PNG.length;
-    OS.close(fd);
-    if (!ok) return OS.remove(path);
-    // (not a live partial: page changes must not delete it before a slow
-    // ueberzugpp has read it; it goes after WARMUP_FILE_MS, or on exit)
-    this.warmupFile = path;
-    OS.setTimeout(() => this.dropWarmupFile(), WARMUP_FILE_MS);
-    const id = "wallrizz-warmup";
-    layer.add(id, 0, 0, 1, 1, path, "fit_contain");
-    // removed once its window is up (removing it earlier would be deferred
-    // by the layer anyway)
-    layer.whenUp(id).then(() => layer.remove(id));
-  }
-
-  dropWarmupFile() {
-    if (this.warmupFile) OS.remove(this.warmupFile);
-    this.warmupFile = null;
   }
 
   async onUeberzugDeath(layer, reason) {
@@ -1563,10 +1525,11 @@ export class GalleryView {
       // drop queued thumbnail work, kill a magick still mid-batch (its temp
       // file is removed) and let the worker threads end
       this.stopBackground?.();
-      await this.thumbs?.shutdown();
+      // (magick children are SIGKILLed; don't wait long for the workers:
+      // the process exits right after)
+      await this.thumbs?.shutdown(150);
       // ueberzugpp is gone: this run's partial composites can go too
       for (const f of partialFiles) OS.remove(f);
-      this.dropWarmupFile();
       this.releaseLiveDir();
       STD.out.puts(clearTerminal);
       print(cursorShow);

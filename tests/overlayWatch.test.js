@@ -3,7 +3,7 @@
 // against tests/mock-swaymsg and tests/mock-ueberzugpp (MOCK_SWAY_EVENTS).
 import * as std from "std";
 import * as os from "os";
-import { JsonStream, ownedBy, WindowWatch, windowWatchKind, HARD_TIMEOUT_MS, FALLBACK_MS, GHOST_CLOSE_MS } from "../src/ui/overlayWatch.js";
+import { JsonStream, ownedBy, WindowWatch, windowWatchKind, HARD_TIMEOUT_MS, FALLBACK_MS, GHOST_CLOSE_MS, REMOVED_MARK_MS } from "../src/ui/overlayWatch.js";
 import { UeberzugLayer } from "../src/ui/ueberzug.js";
 
 const [, testsDir, work] = scriptArgs;
@@ -103,13 +103,12 @@ const emit = (pid, id, app = `ueberzugpp_t${id}`, change = "new") => {
   sent("b");
   await waitUntil("b timeout", () => ups.b, 3000);
   ok("b: hard timeout ~1 s", ups.b?.how === "timeout" && ups.b.ms >= HARD_TIMEOUT_MS - 5 && ups.b.ms < HARD_TIMEOUT_MS + 400 * SCALE, JSON.stringify(ups.b));
+  // b timed out on its own and left the queue: it doesn't hold up c
+  ok("timed-out add leaves the queue", w.waiting() === 0 && w.queue.length === 0, JSON.stringify(w.queue));
   sent("c");
-  emit(owner, 4); // b's late window
-  await os.sleepAsync(80);
-  eq("late window of a timed-out add doesn't confirm the next", ups.c, undefined);
   emit(owner, 5);
   await waitUntil("c mapped", () => ups.c);
-  eq("c confirmed by its own window", ups.c?.how, "mapped");
+  ok("next add confirmed by the next window, at once", ups.c?.how === "mapped" && ups.c.ms < 100 * SCALE, JSON.stringify(ups.c));
   // removed before its window appeared: its window is eaten, not credited
   sent("d");
   w.forget("d");
@@ -125,16 +124,55 @@ const emit = (pid, id, app = `ueberzugpp_t${id}`, change = "new") => {
   ok("swaymsg child killed on stop", childPid && os.kill(childPid, 0) !== 0);
 }
 
-// 6. sway: an add sent before the subscription is surely up uses the short
-// fallback, not the 1 s timeout (its event may have been missed)
+// 6. sway: an add whose window never appears costs only its own timeout;
+// it never stalls the adds after it
 {
-  const w = new WindowWatch(() => 1, { kind: "sway", parent: () => 1 });
-  let up = null;
-  const t0 = Date.now();
-  w.sent("early", (how) => { up = { how, ms: Date.now() - t0 }; });
-  await waitUntil("early", () => up, 3000);
-  ok("early add: fallback, not the 1 s timeout", up?.how === "fallback-early" && up.ms < HARD_TIMEOUT_MS - 200, JSON.stringify(up));
+  const owner = 4242;
+  const w = new WindowWatch(() => owner, { kind: "sway", parent: () => 1 });
+  const ups = {};
+  const t0s = {};
+  const sent = (id) => {
+    t0s[id] = Date.now();
+    w.sent(id, (how) => { ups[id] = { how, ms: Date.now() - t0s[id] }; });
+  };
+  // sent right away (no wait for the subscription): plain hard timeout
+  sent("n1"); // never maps
+  await waitUntil("n1 timeout", () => ups.n1, 3000);
+  ok("never-mapping add: its own hard timeout", ups.n1?.how === "timeout" && ups.n1.ms < HARD_TIMEOUT_MS + 300 * SCALE, JSON.stringify(ups.n1));
+  sent("n2");
+  await os.sleepAsync(40);
+  emit(owner, 30);
+  await waitUntil("n2", () => ups.n2, 2000);
+  ok("add after a never-mapping one: confirmed by its window at once", ups.n2?.how === "mapped" && ups.n2.ms < 150 * SCALE, JSON.stringify(ups.n2));
+  // two in flight, the older never maps: the window goes to the older (pid
+  // and order are all there is), the newer times out on its own, and the
+  // queue is clear again for the next add
+  sent("n3"); // never maps
+  await os.sleepAsync(300);
+  sent("n4");
+  await os.sleepAsync(40);
+  emit(owner, 31); // n4's window
+  await waitUntil("n4 timeout", () => ups.n4, 3000);
+  ok("in-flight pair: the newer waits at most its own timeout", ups.n4 && ups.n4.ms < HARD_TIMEOUT_MS + 300 * SCALE, JSON.stringify(ups));
+  sent("n5");
+  await os.sleepAsync(40);
+  emit(owner, 32);
+  await waitUntil("n5", () => ups.n5, 2000);
+  ok("then the next add is confirmed by its window at once", ups.n5?.how === "mapped" && ups.n5.ms < 150 * SCALE, JSON.stringify(ups.n5));
+  // a removed marker never outlives REMOVED_MARK_MS
+  sent("n6");
+  await waitUntil("n6 timeout", () => ups.n6, 3000);
+  w.removedUnseen("n6");
+  ok("removed marker kept", w.queue.length === 1 && !w.queue[0].cb, JSON.stringify(w.queue));
+  await os.sleepAsync(REMOVED_MARK_MS + 50);
+  sent("n7");
+  await os.sleepAsync(40);
+  const t7 = Date.now();
+  emit(owner, 33);
+  await waitUntil("n7", () => ups.n7, 2000);
+  ok("expired marker: the window isn't held", ups.n7?.how === "mapped" && Date.now() - t7 < GHOST_CLOSE_MS * SCALE, JSON.stringify(ups.n7));
   w.stop();
+  ok("stop clears every timer and the queue", w.queue.length === 0 && w.timedOut.size === 0 && !w.held);
 }
 
 // 7. sway: an add that timed out and was then removed may never get its

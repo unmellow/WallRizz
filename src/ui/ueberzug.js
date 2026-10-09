@@ -32,7 +32,9 @@
  * the previous one's window. So, with confirmation, an overlay whose window
  * isn't up yet is not removed at once: it is "doomed", removed as soon as
  * its window is up (or timed out), and no add is sent meanwhile (at most
- * two overlays alive).
+ * two overlays alive). Every add has its own timeout, so a doomed overlay
+ * holds the next add back for at most HARD_TIMEOUT_MS, and one window that
+ * never appears never delays the ones after it.
  */
 import { OS, STD } from "../core/constants.js";
 import { abortThumbnails } from "../wallpaper/thumbnails.js";
@@ -503,10 +505,12 @@ export class UeberzugLayer {
       }
       return false;
     };
-    if (reaped(300)) return;
+    // (bounded: quitting must stay fast even while ueberzugpp is busy
+    // starting up or loading an image)
+    if (reaped(80)) return;
     OS.kill(pid, OS.SIGTERM);
-    if (reaped(300)) return;
+    if (reaped(80)) return;
     OS.kill(pid, OS.SIGKILL);
-    reaped(100);
+    reaped(50);
   }
 }
