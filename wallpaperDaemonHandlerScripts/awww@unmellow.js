@@ -1,34 +1,24 @@
 /*
  For:            awww (swww renamed), https://codeberg.org/LGFae/awww
  Author:         https://github.com/unmellow
- Prerequisite:   awww-daemon running (awww img). swww is only a fallback.
+ Prerequisite:   awww-daemon is running.
 
- The file used to be named swww@….js and invoked `swww` even when the
- installed daemon was awww. The command is awww. If `awww` is not on PATH
- the same arguments are passed to `swww`.
+ Always invokes `awww`. No PATH probe: OS.exec does not return a pair, and
+ a probe here threw "value is not iterable" inside the handler worker.
 */
-
-function wallpaperBin() {
-  // OS.exec returns an exit status, 0 on success. It is not a [stdout, err] pair.
-  if (!OS.exec(["sh", "-c", "command -v awww >/dev/null 2>&1"])) return "awww";
-  return "swww";
-}
 
 export async function setWallpaper(wallpaperPath, resizeMode) {
   const options = generateRandomSwwwOptions();
-  // WallRizz asks on selection: crop (cover), fit (contain), no (no scale).
   if (resizeMode === "crop" || resizeMode === "fit" || resizeMode === "no") {
     options.resize = resizeMode;
     options.noResize = false;
   }
-  const command = createSwwwCommand(wallpaperPath, options);
-  await execAsync(command);
+  await execAsync(createAwwwCommand(wallpaperPath, options));
 }
 
-function createSwwwCommand(imagePath, options) {
-  const command = [wallpaperBin(), "img", imagePath];
+function createAwwwCommand(imagePath, options) {
+  const command = ["awww", "img", imagePath];
 
-  // Adding options to the command
   if (options.noResize) {
     command.push("--no-resize");
   }
@@ -69,8 +59,6 @@ function generateRandomSwwwOptions() {
   }
 
   const transitionTypes = [
-    // "none",
-    // "simple",
     "fade",
     "left",
     "right",
@@ -80,18 +68,16 @@ function generateRandomSwwwOptions() {
     "wave",
     "grow",
     "center",
-    // "any",
     "outer",
-    // "random",
-  ]; // Transition types
+  ];
 
-  const options = {
-    resize: "crop", // Resize method ["no", "crop", "fit"]
-    transitionType: getRandomElement(transitionTypes), // Type of transition
-    transitionStep: 255, // Speed of transition (0-255)
-    transitionDuration: 1, // Duration of transition (1-10 seconds)
-    transitionFps: 60, // Frame rate for transition (1-60)
-    transitionAngle: Math.floor(Math.random() * 360), // Angle for "wipe" and "wave" transitions (0-360 degrees)
+  return {
+    resize: "crop",
+    transitionType: getRandomElement(transitionTypes),
+    transitionStep: 255,
+    transitionDuration: 1,
+    transitionFps: 60,
+    transitionAngle: Math.floor(Math.random() * 360),
     transitionPos: getRandomElement([
       "center",
       "top",
@@ -103,8 +89,6 @@ function generateRandomSwwwOptions() {
       "bottom-left",
       "bottom-right",
       `${Math.random() * 100},${Math.random() * 100}`,
-    ]), // Center position for transitions
+    ]),
   };
-
-  return options;
 }
