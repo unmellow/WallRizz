@@ -239,11 +239,22 @@ export default class WallpaperManager {
   async setWallpaper(wallpaperName, resizeMode = readResizeMode()) {
     const wallpaperPath =
       `${this.config.wallpapersDirectory}${wallpaperName}`;
-    // second arg is crop | fit | no; handlers that ignore it keep old behaviour
-    await this.wallpaperDaemonHandler(wallpaperPath, resizeMode);
+    const mode = resizeMode === "fit" || resizeMode === "no" ? resizeMode : "crop";
+    try {
+      await this.wallpaperDaemonHandler(wallpaperPath, mode);
+    } catch (err) {
+      // The installed awww handler threw before invoking the daemon
+      // (OS.exec is not a pair). Set it here so selection still changes
+      // the background.
+      const code = OS.exec(["awww", "img", "--resize", mode, wallpaperPath]);
+      if (code) {
+        const again = OS.exec(["swww", "img", "--resize", mode, wallpaperPath]);
+        if (again) throw err;
+      }
+    }
     await notify(
       "New wallpaper",
-      `${wallpaperName} (${resizeMode})`,
+      `${wallpaperName} (${mode})`,
       "normal",
       this.config,
     );
