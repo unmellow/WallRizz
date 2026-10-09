@@ -9,8 +9,8 @@
 */
 
 function wallpaperBin() {
-  const [awww, err] = OS.exec(["sh", "-c", "command -v awww"]);
-  if (!err && awww && String(awww).trim()) return "awww";
+  // OS.exec returns an exit status, 0 on success. It is not a [stdout, err] pair.
+  if (!OS.exec(["sh", "-c", "command -v awww >/dev/null 2>&1"])) return "awww";
   return "swww";
 }
 
