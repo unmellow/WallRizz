@@ -1444,47 +1444,32 @@ export class GalleryView {
       exit();
     };
 
-    // Enter asks crop / fit / no resize before the wallpaper is set.
-    // f is fullscreen until that line is up; then f means fit.
-    let pickingResize = false;
-    // Paint the prompt on the last row only. A full redraw here relayouts
-    // the grid (the status line reserves a row) and the key handler then
-    // throws, which removes the stdin reader: the menu is on screen and
-    // every key after Enter is ignored.
-    const paintResizeLine = () => {
+    // Mode is not a second prompt. The last-row write scrolled the terminal
+    // (Sway's binding list showed through) and Enter then waited for a key
+    // the reader no longer had. z cycles the saved mode; Enter sets at once.
+    const MODES = ["crop", "fit", "no"];
+    const paintMode = () => {
       try {
         const size = OS.ttyGetWinSize();
         const w = size[0] || 80;
-        const h = size[1] || 24;
+        const h = Math.max(1, (size[1] || 24) - 1);
         const line = resizeStatusLine(readResizeMode()).slice(0, Math.max(1, w - 1));
-        this.statusLine = line;
-        STD.out.puts(cursorTo(0, Math.max(0, h - 1)) + "\x1b[2K\x1b[0;7m" + line + "\x1b[0m");
+        STD.out.printf("%s", cursorTo(0, h) + "\x1b[2K\x1b[0;7m" + line + "\x1b[0m");
         STD.out.flush();
       } catch (_) {}
     };
-    const showResizeLine = () => paintResizeLine();
-    const cancelResize = () => {
-      pickingResize = false;
-      this.statusLine = null;
-      try {
-        const h = OS.ttyGetWinSize()[1] || 24;
-        STD.out.puts(cursorTo(0, Math.max(0, h - 1)) + "\x1b[2K");
-        STD.out.flush();
-      } catch (_) {}
+    const cycleMode = () => {
+      const cur = readResizeMode();
+      const next = MODES[(MODES.indexOf(cur) + 1) % MODES.length];
+      writeResizeMode(next);
+      paintMode();
     };
-    const confirmResize = (mode) => {
-      try {
-        const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
-        const wallpaper = pngs[globalIndex];
-        if (!wallpaper || !mode) return cancelResize();
-        writeResizeMode(mode);
-        pickingResize = false;
-        this.statusLine = null;
-        wallpaper.resizeMode = mode;
-        return onSelect(wallpaper, globalIndex);
-      } catch (_) {
-        cancelResize();
-      }
+    const selectCurrent = () => {
+      const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
+      const wallpaper = pngs[globalIndex];
+      if (!wallpaper) return;
+      wallpaper.resizeMode = readResizeMode();
+      return onSelect(wallpaper, globalIndex);
     };
 
     // Keys are read from the event loop (never a blocking read), so worker
@@ -1533,15 +1518,8 @@ export class GalleryView {
       "H": prevPage,
       "L": nextPage,
 
-      [keySequences.Enter]: () => {
-        const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
-        if (!pngs[globalIndex]) return;
-        if (!pickingResize) {
-          pickingResize = true;
-          return showResizeLine();
-        }
-        return confirmResize(readResizeMode());
-      },
+      [keySequences.Enter]: () => selectCurrent(),
+      "z": () => cycleMode(),
 
       [keySequences.Space]: () => {
         USER_ARGUMENTS.focusSet = !USER_ARGUMENTS.focusSet;
@@ -1557,31 +1535,7 @@ export class GalleryView {
       // raw mode: Ctrl+C arrives as a key, not as SIGINT
       [keySequences["Ctrl+C"]]: handleExit,
     };
-    const wrapped = {};
-    for (const [key, fn] of Object.entries(keys)) {
-      wrapped[key] = (seq, quit) => {
-        if (!pickingResize) return fn(seq, quit);
-        if (key === "q" || key === keySequences["Ctrl+C"]) return fn(seq, quit);
-        if (key === keySequences.Enter) return confirmResize(readResizeMode());
-        return;
-      };
-    }
-    wrapped["c"] = () => pickingResize ? confirmResize("crop") : undefined;
-    wrapped["C"] = wrapped["c"];
-    wrapped["n"] = () => pickingResize ? confirmResize("no") : undefined;
-    wrapped["N"] = wrapped["n"];
-    wrapped["f"] = (seq, quit) =>
-      pickingResize ? confirmResize("fit") : keys["f"](seq, quit);
-    wrapped["F"] = (seq, quit) =>
-      pickingResize ? confirmResize("fit") : undefined;
-    // Do not bind Escape. Arrow keys start with ESC, and a bound Escape
-    // makes the reader hold the next byte. Esc still cancels: the reader
-    // delivers a bare ESC when it is not a longer sequence.
-    wrapped["default"] = (seq) => {
-      if (!pickingResize) return;
-      if (seq === keySequences.Escape || seq === "\x1b") cancelResize();
-    };
-    await handleKeysPressAsync(wrapped);
+    await handleKeysPressAsync(keys);
 
     } finally {
       active = false;
