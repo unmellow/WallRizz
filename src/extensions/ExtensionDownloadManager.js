@@ -1,3 +1,11 @@
+
+function blobDownloadUrl(script) {
+  const raw = script.download_url || "";
+  const m = raw.match(/^(https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+)\/[^/]+\/(.+)$/);
+  if (m && script.sha) return `${m[1]}/${script.sha}/${m[2]}`;
+  return raw;
+}
+
 import { ProcessSync } from "../../qjs-ext-lib/src/process.js";
 import Download from "./DownloadManager.js";
 import { ansi } from "../../helpers/ansiStyle.js";
@@ -38,7 +46,9 @@ class ExtensionScriptsDownloader extends Download {
         .then((head) => ({
           name: script.name,
           about: head,
-          downloadUrl: script.download_url,
+          // raw.githubusercontent.com/<branch>/... stayed on the broken
+          // awww handler. The blob sha cannot.
+          downloadUrl: blobDownloadUrl(script),
         }));
 
       promises.push(getScriptPromise);
