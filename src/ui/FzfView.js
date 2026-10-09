@@ -14,6 +14,8 @@ import {
 } from "./terminalImage.js";
 import { base64Utf8 } from "./imageProtocol.js";
 import { UeberzugLayer } from "./ueberzug.js";
+import { handleKeysPressSync, keySequences } from "../../helpers/terminal.js";
+import { readResizeMode, writeResizeMode } from "../wallpaper/resizeMode.js";
 
 export class FzfView {
   constructor(config, wallpapers, wallpapersDir, handleSelection, getWallpaperPath) {
@@ -165,6 +167,11 @@ export class FzfView {
 
     const wallpaper = previewer.stdout.split("\n")[0].trim();
     const selection = this.wallpapers.find((wp) => wp.name === wallpaper);
+    const mode = await askResizeMode();
+    if (!mode) {
+      throw EXIT;
+    }
+    selection.resizeMode = mode;
     await this.handleSelection(selection);
     throw EXIT;
   }
@@ -242,4 +249,21 @@ export class FzfView {
   toBase64(str) {
     return base64Utf8(str);
   }
+}
+
+function askResizeMode() {
+  const saved = readResizeMode();
+  print(
+    `Display as  c crop   f fit   n no resize   Enter ${saved}   Esc cancel`,
+  );
+  return new Promise((resolve) => {
+    handleKeysPressSync({
+      c: (_, quit) => { writeResizeMode("crop"); quit(); resolve("crop"); },
+      f: (_, quit) => { writeResizeMode("fit"); quit(); resolve("fit"); },
+      n: (_, quit) => { writeResizeMode("no"); quit(); resolve("no"); },
+      [keySequences.Enter]: (_, quit) => { quit(); resolve(saved); },
+      [keySequences.Escape]: (_, quit) => { quit(); resolve(null); },
+      q: (_, quit) => { quit(); resolve(null); },
+    });
+  });
 }

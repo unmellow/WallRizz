@@ -9,6 +9,7 @@ import { defaultPoolSize, magickSlots, startCacheCleanup, thumbName } from "./th
 import { formatBytes } from "./cacheCleanup.js";
 import { CACHE_DIR } from "../core/cachePaths.js";
 import { OS, STD, HOME_DIR, EXIT, SystemError } from "../core/constants.js";
+import { readResizeMode } from "./resizeMode.js";
 
 export default class WallpaperManager {
   constructor(config) {
@@ -216,9 +217,10 @@ export default class WallpaperManager {
     if (!this.themeManager.getCachedColours(uniqueId)) {
       await this.themeManager.ensureWallpaper(uniqueId, name);
     }
+    const resizeMode = wallpaper.resizeMode || readResizeMode();
     const promises = [
       this.themeManager.setThemes(uniqueId, name),
-      this.setWallpaper(name),
+      this.setWallpaper(name, resizeMode),
     ];
     await Promise.all(promises);
     if (!this.config.hold) throw EXIT;
@@ -234,10 +236,16 @@ export default class WallpaperManager {
     return /^(jpeg|png|webp|jpg|gif)$/i.test(format);
   }
 
-  async setWallpaper(wallpaperName) {
+  async setWallpaper(wallpaperName, resizeMode = readResizeMode()) {
     const wallpaperPath =
       `${this.config.wallpapersDirectory}${wallpaperName}`;
-    await this.wallpaperDaemonHandler(wallpaperPath);
-    await notify("New wallpaper", wallpaperName, "normal", this.config);
+    // second arg is crop | fit | no; handlers that ignore it keep old behaviour
+    await this.wallpaperDaemonHandler(wallpaperPath, resizeMode);
+    await notify(
+      "New wallpaper",
+      `${wallpaperName} (${resizeMode})`,
+      "normal",
+      this.config,
+    );
   }
 }

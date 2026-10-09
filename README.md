@@ -40,6 +40,18 @@ WALLPAPER_DIR=~/Pictures/wallpapers WallRizz -R
 
 Hidden folders (names starting with `.`) are skipped. Symlinked folders are followed, but every real directory is scanned only once, so symlink loops terminate and a folder reachable through both a link and its real path isn't listed twice. Wallpapers in sub folders are shown with their relative path (e.g. `favorites/landscape/sunset.jpg`); thumbnails and colour caches are keyed by the full path plus the file's modification time and size, so files with the same name in different folders don't collide, and an edited wallpaper gets a new thumbnail and palette.
 
+# How the wallpaper is fitted
+
+Enter does not set the wallpaper immediately. A line at the bottom asks how to display it:
+
+- `c` crop: cover the screen, cut off the overflow (swww `--resize crop`, swaybg `-m fill`)
+- `f` fit: show the whole image, bars if the aspect differs (swww `--resize fit`, swaybg `-m fit`)
+- `n` no resize: native pixels, centered (swww `--resize no`, swaybg `-m center`)
+- Enter confirms the starred choice (the last one you used; crop until you pick one)
+- Esc goes back to the grid
+
+The choice is saved in `~/.config/WallRizz/resize-mode`. Random and interval sets reuse it and do not ask. The swww handler shipped with WallRizz honours it; re-download with `WallRizz -w` if `~/.config/WallRizz/` still has an older copy (it always crops). A swaybg handler is `swaybg@unmellow.js`.
+
 # Image previews in any terminal
 
 WallRizz picks an image protocol for the grid and list views automatically, the way [yazi](https://github.com/sxyazi/yazi) does:

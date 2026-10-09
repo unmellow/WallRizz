@@ -38,6 +38,7 @@ import { pageComposite, ueberzugOverlayMode } from "./pageComposite.js";
 import { claimLiveDir, liveRenderDir, releaseLiveDir, sweepDeadPartials } from "./liveDir.js";
 import { ueberzugSpacing } from "./imageProtocol.js";
 import { defaultPoolSize, magickSlots, ThumbPool } from "../wallpaper/thumbnails.js";
+import { readResizeMode, writeResizeMode, resizeStatusLine } from "../wallpaper/resizeMode.js";
 
 // SIGWINCH (28 on Linux, macOS and the BSDs); QuickJS doesn't export it
 const SIGWINCH = 28;
@@ -1443,10 +1444,33 @@ export class GalleryView {
       exit();
     };
 
+    // Enter asks crop / fit / no resize before the wallpaper is set.
+    // f is fullscreen until that line is up; then f means fit.
+    let pickingResize = false;
+    const showResizeLine = () => {
+      this.statusLine = resizeStatusLine(readResizeMode());
+      this.redraw?.();
+    };
+    const cancelResize = () => {
+      pickingResize = false;
+      this.statusLine = null;
+      this.redraw?.();
+    };
+    const confirmResize = (mode) => {
+      const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
+      const wallpaper = pngs[globalIndex];
+      if (!wallpaper || !mode) return cancelResize();
+      writeResizeMode(mode);
+      pickingResize = false;
+      this.statusLine = null;
+      wallpaper.resizeMode = mode;
+      return onSelect(wallpaper, globalIndex);
+    };
+
     // Keys are read from the event loop (never a blocking read), so worker
     // results, tile encodes and prefetch keep running between keys, and a
     // key is handled while a cold page is still being generated.
-    await handleKeysPressAsync({
+    const keys = {
       [keySequences.ArrowDown]: () => {
         if (isFullScreen && zoomLevel > 1) return panDown();
         moveSelectionDown();
@@ -1491,9 +1515,12 @@ export class GalleryView {
 
       [keySequences.Enter]: () => {
         const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
-        if (pngs[globalIndex]) {
-          return onSelect(pngs[globalIndex], globalIndex);
+        if (!pngs[globalIndex]) return;
+        if (!pickingResize) {
+          pickingResize = true;
+          return showResizeLine();
         }
+        return confirmResize(readResizeMode());
       },
 
       [keySequences.Space]: () => {
@@ -1509,7 +1536,24 @@ export class GalleryView {
       "q": handleExit,
       // raw mode: Ctrl+C arrives as a key, not as SIGINT
       [keySequences["Ctrl+C"]]: handleExit,
-    });
+    };
+    const wrapped = {};
+    for (const [key, fn] of Object.entries(keys)) {
+      wrapped[key] = (seq, quit) => {
+        if (!pickingResize) return fn(seq, quit);
+        if (key === "q" || key === keySequences["Ctrl+C"]) return fn(seq, quit);
+        if (key === keySequences.Enter) return confirmResize(readResizeMode());
+        return;
+      };
+    }
+    wrapped["c"] = () => pickingResize ? confirmResize("crop") : undefined;
+    wrapped["n"] = () => pickingResize ? confirmResize("no") : undefined;
+    wrapped["f"] = (seq, quit) =>
+      pickingResize ? confirmResize("fit") : keys["f"](seq, quit);
+    wrapped[keySequences.Escape] = () => {
+      if (pickingResize) cancelResize();
+    };
+    await handleKeysPressAsync(wrapped);
 
     } finally {
       active = false;

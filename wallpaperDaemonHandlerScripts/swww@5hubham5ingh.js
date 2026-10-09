@@ -4,11 +4,14 @@
  Prerequisite:   swww daemon should be running
 */
 
-export async function setWallpaper(wallpaperPath) {
-  const command = createSwwwCommand(
-    wallpaperPath,
-    generateRandomSwwwOptions(),
-  );
+export async function setWallpaper(wallpaperPath, resizeMode) {
+  const options = generateRandomSwwwOptions();
+  // WallRizz asks on selection: crop (cover), fit (contain), no (no scale).
+  if (resizeMode === "crop" || resizeMode === "fit" || resizeMode === "no") {
+    options.resize = resizeMode;
+    options.noResize = false;
+  }
+  const command = createSwwwCommand(wallpaperPath, options);
   await execAsync(command);
 }
 

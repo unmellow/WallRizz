@@ -73,7 +73,7 @@ class UserInterface {
   static printKeyMaps() {
     print("Keymaps:");
     print("  Arrow keys / hjkl : Navigate");
-    print("  Enter             : Select");
+    print("  Enter             : Select, then c crop / f fit / n no resize");
     print("  f                 : Fullscreen preview");
     print("  H / L             : Page Up / Down");
     print("  q                 : Exit");
