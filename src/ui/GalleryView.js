@@ -1447,24 +1447,44 @@ export class GalleryView {
     // Enter asks crop / fit / no resize before the wallpaper is set.
     // f is fullscreen until that line is up; then f means fit.
     let pickingResize = false;
-    const showResizeLine = () => {
-      this.statusLine = resizeStatusLine(readResizeMode());
-      this.redraw?.();
+    // Paint the prompt on the last row only. A full redraw here relayouts
+    // the grid (the status line reserves a row) and the key handler then
+    // throws, which removes the stdin reader: the menu is on screen and
+    // every key after Enter is ignored.
+    const paintResizeLine = () => {
+      try {
+        const size = OS.ttyGetWinSize();
+        const w = size[0] || 80;
+        const h = size[1] || 24;
+        const line = resizeStatusLine(readResizeMode()).slice(0, Math.max(1, w - 1));
+        this.statusLine = line;
+        STD.out.puts(cursorTo(0, Math.max(0, h - 1)) + "\x1b[2K\x1b[0;7m" + line + "\x1b[0m");
+        STD.out.flush();
+      } catch (_) {}
     };
+    const showResizeLine = () => paintResizeLine();
     const cancelResize = () => {
       pickingResize = false;
       this.statusLine = null;
-      this.redraw?.();
+      try {
+        const h = OS.ttyGetWinSize()[1] || 24;
+        STD.out.puts(cursorTo(0, Math.max(0, h - 1)) + "\x1b[2K");
+        STD.out.flush();
+      } catch (_) {}
     };
     const confirmResize = (mode) => {
-      const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
-      const wallpaper = pngs[globalIndex];
-      if (!wallpaper || !mode) return cancelResize();
-      writeResizeMode(mode);
-      pickingResize = false;
-      this.statusLine = null;
-      wallpaper.resizeMode = mode;
-      return onSelect(wallpaper, globalIndex);
+      try {
+        const globalIndex = (currentPage * maxCellsInGrid) + currentCell;
+        const wallpaper = pngs[globalIndex];
+        if (!wallpaper || !mode) return cancelResize();
+        writeResizeMode(mode);
+        pickingResize = false;
+        this.statusLine = null;
+        wallpaper.resizeMode = mode;
+        return onSelect(wallpaper, globalIndex);
+      } catch (_) {
+        cancelResize();
+      }
     };
 
     // Keys are read from the event loop (never a blocking read), so worker
@@ -1547,11 +1567,19 @@ export class GalleryView {
       };
     }
     wrapped["c"] = () => pickingResize ? confirmResize("crop") : undefined;
+    wrapped["C"] = wrapped["c"];
     wrapped["n"] = () => pickingResize ? confirmResize("no") : undefined;
+    wrapped["N"] = wrapped["n"];
     wrapped["f"] = (seq, quit) =>
       pickingResize ? confirmResize("fit") : keys["f"](seq, quit);
-    wrapped[keySequences.Escape] = () => {
-      if (pickingResize) cancelResize();
+    wrapped["F"] = (seq, quit) =>
+      pickingResize ? confirmResize("fit") : undefined;
+    // Do not bind Escape. Arrow keys start with ESC, and a bound Escape
+    // makes the reader hold the next byte. Esc still cancels: the reader
+    // delivers a bare ESC when it is not a longer sequence.
+    wrapped["default"] = (seq) => {
+      if (!pickingResize) return;
+      if (seq === keySequences.Escape || seq === "\x1b") cancelResize();
     };
     await handleKeysPressAsync(wrapped);
 

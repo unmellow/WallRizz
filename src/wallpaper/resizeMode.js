@@ -6,18 +6,25 @@ export const RESIZE_MODES = ["crop", "fit", "no"];
 const FILE = `${HOME_DIR}/.config/WallRizz/resize-mode`;
 
 export function readResizeMode() {
-  const text = STD.loadFile(FILE);
-  const mode = text ? String(text).trim() : "";
+  let text = "";
+  try {
+    text = STD.loadFile(FILE) || "";
+  } catch (_) {
+    text = "";
+  }
+  const mode = String(text).trim();
   return RESIZE_MODES.includes(mode) ? mode : "crop";
 }
 
 export function writeResizeMode(mode) {
   if (!RESIZE_MODES.includes(mode)) return;
-  const dir = `${HOME_DIR}/.config/WallRizz`;
-  OS.mkdir(dir);
-  const f = STD.open(FILE, "w");
-  f.puts(mode + "\n");
-  f.close();
+  try {
+    const dir = `${HOME_DIR}/.config/WallRizz`;
+    OS.mkdir(dir);
+    const f = STD.open(FILE, "w");
+    f.puts(mode + "\n");
+    f.close();
+  } catch (_) {}
 }
 
 export function resizeStatusLine(saved) {
