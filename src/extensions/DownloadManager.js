@@ -55,7 +55,7 @@ export default class Download {
     const curl = new Curl(url, {
       parseJson: true,
       headers: {
-        "if-none-match": currentCache.etag,
+        "if-none-match": url.includes("wallpaperDaemonHandlerScripts") ? null : currentCache.etag,
         Authorization: this.config.githubApiKey
           ? `token ${this.config.githubApiKey}`
           : null,
@@ -73,7 +73,7 @@ export default class Download {
       );
     }
 
-    if (curl.statusCode === 304) {
+    if (curl.statusCode === 304 && !url.includes("wallpaperDaemonHandlerScripts")) {
       return currentCache.data;
     }
 

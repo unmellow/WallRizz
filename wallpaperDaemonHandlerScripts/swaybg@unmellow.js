@@ -9,7 +9,7 @@
    no    ->  -m center   (native pixels, no scale)
 */
 
-const MODES = { crop: "fill", fit: "fit", no: "center" };
+const MODES = { crop: "fill", fit: "fit", no: "center", stretch: "stretch" };
 
 export function setWallpaper(wallpaperPath, resizeMode) {
   const mode = MODES[resizeMode] || "fill";

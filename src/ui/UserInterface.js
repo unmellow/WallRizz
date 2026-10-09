@@ -73,7 +73,7 @@ class UserInterface {
   static printKeyMaps() {
     print("Keymaps:");
     print("  Arrow keys / hjkl : Navigate");
-    print("  Enter             : Set wallpaper (z cycles crop / fit / no resize)");
+    print("  Enter             : Set wallpaper (z cycles crop / fit / no / stretch)");
     print("  f                 : Fullscreen preview");
     print("  H / L             : Page Up / Down");
     print("  q                 : Exit");

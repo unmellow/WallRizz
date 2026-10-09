@@ -9,7 +9,7 @@
 
 export async function setWallpaper(wallpaperPath, resizeMode) {
   const options = generateRandomSwwwOptions();
-  if (resizeMode === "crop" || resizeMode === "fit" || resizeMode === "no") {
+  if (resizeMode === "crop" || resizeMode === "fit" || resizeMode === "no" || resizeMode === "stretch") {
     options.resize = resizeMode;
     options.noResize = false;
   }

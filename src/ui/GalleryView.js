@@ -841,7 +841,7 @@ export class GalleryView {
       const addNow = (c, path) => {
         // ueberzug cells are 0-based, cursorTo rows are 1-based
         const newId = `${id}-u${++serial}`;
-        ueberzug.add(newId, c.region.x, c.region.y - 1, c.region.columns, c.region.rows, path, "fit_contain");
+        ueberzug.add(newId, c.region.x, c.region.y - 1, c.region.columns, Math.max(1, c.region.rows - 1), path, "fit_contain");
         const replaced = liveId ? [liveId] : replaces;
         replaces = [];
         liveId = newId;
@@ -956,7 +956,7 @@ export class GalleryView {
           box.x,
           box.y - 1,
           box.columns,
-          box.rows,
+          Math.max(1, box.rows - 1),
           thumb,
           "fit_contain",
         );
@@ -1447,7 +1447,7 @@ export class GalleryView {
     // Mode is not a second prompt. The last-row write scrolled the terminal
     // (Sway's binding list showed through) and Enter then waited for a key
     // the reader no longer had. z cycles the saved mode; Enter sets at once.
-    const MODES = ["crop", "fit", "no"];
+    const MODES = ["crop", "fit", "no", "stretch"];
     const paintMode = () => {
       try {
         const size = OS.ttyGetWinSize();

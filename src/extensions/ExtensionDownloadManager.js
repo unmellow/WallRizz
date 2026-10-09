@@ -148,7 +148,7 @@ class WallpaperDaemonHandlerScriptDownloadManager
   constructor(config) {
     // This fork's handlers, not upstream. awww@unmellow.js lives here.
     const themeExtensionSourceRepoUrl =
-      `https://api.github.com/repos/unmellow/WallRizz/contents/wallpaperDaemonHandlerScripts`;
+      `https://api.github.com/repos/unmellow/WallRizz/contents/wallpaperDaemonHandlerScripts?ref=main`;
     const themeExtensionScriptDestinationDir = HOME_DIR.concat(
       "/.config/WallRizz/",
     );

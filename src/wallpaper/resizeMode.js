@@ -1,7 +1,7 @@
 import { HOME_DIR, OS, STD } from "../core/constants.js";
 
 // swww --resize values. swaybg maps these to fill / fit / center.
-export const RESIZE_MODES = ["crop", "fit", "no"];
+export const RESIZE_MODES = ["crop", "fit", "no", "stretch"];
 
 const FILE = `${HOME_DIR}/.config/WallRizz/resize-mode`;
 
@@ -30,8 +30,9 @@ export function writeResizeMode(mode) {
 export function resizeStatusLine(saved) {
   const mark = (mode, label) =>
     mode === saved ? `[${label} *]` : `[${label}]`;
-  return "Display  c " + mark("crop", "crop") +
-    "   f " + mark("fit", "fit") +
-    "   n " + mark("no", "no resize") +
-    "   Enter confirms   Esc cancels";
+  return "z cycles  " + mark("crop", "crop") +
+    "  " + mark("fit", "fit") +
+    "  " + mark("no", "no") +
+    "  " + mark("stretch", "stretch") +
+    "   Enter sets";
 }

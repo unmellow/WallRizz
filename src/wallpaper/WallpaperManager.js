@@ -239,7 +239,7 @@ export default class WallpaperManager {
   async setWallpaper(wallpaperName, resizeMode = readResizeMode()) {
     const wallpaperPath =
       `${this.config.wallpapersDirectory}${wallpaperName}`;
-    const mode = resizeMode === "fit" || resizeMode === "no" ? resizeMode : "crop";
+    const mode = ["fit", "no", "stretch"].includes(resizeMode) ? resizeMode : "crop";
     try {
       await this.wallpaperDaemonHandler(wallpaperPath, mode);
     } catch (err) {
