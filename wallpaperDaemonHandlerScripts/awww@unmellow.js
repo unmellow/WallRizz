@@ -1,8 +1,18 @@
 /*
- For:            swww, https://github.com/LGFae/swww
- Author:         https://github.com/5hubham5ingh
- Prerequisite:   swww daemon should be running
+ For:            awww (swww renamed), https://codeberg.org/LGFae/awww
+ Author:         https://github.com/unmellow
+ Prerequisite:   awww-daemon running (awww img). swww is only a fallback.
+
+ The file used to be named swww@….js and invoked `swww` even when the
+ installed daemon was awww. The command is awww. If `awww` is not on PATH
+ the same arguments are passed to `swww`.
 */
+
+function wallpaperBin() {
+  const [awww, err] = OS.exec(["sh", "-c", "command -v awww"]);
+  if (!err && awww && String(awww).trim()) return "awww";
+  return "swww";
+}
 
 export async function setWallpaper(wallpaperPath, resizeMode) {
   const options = generateRandomSwwwOptions();
@@ -16,7 +26,7 @@ export async function setWallpaper(wallpaperPath, resizeMode) {
 }
 
 function createSwwwCommand(imagePath, options) {
-  const command = ["swww", "img", imagePath];
+  const command = [wallpaperBin(), "img", imagePath];
 
   // Adding options to the command
   if (options.noResize) {

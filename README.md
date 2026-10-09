@@ -50,7 +50,7 @@ Enter does not set the wallpaper immediately. A line at the bottom asks how to d
 - Enter confirms the starred choice (the last one you used; crop until you pick one)
 - Esc goes back to the grid
 
-The choice is saved in `~/.config/WallRizz/resize-mode`. Random and interval sets reuse it and do not ask. The swww handler shipped with WallRizz honours it; re-download with `WallRizz -w` if `~/.config/WallRizz/` still has an older copy (it always crops). A swaybg handler is `swaybg@unmellow.js`.
+The choice is saved in `~/.config/WallRizz/resize-mode`. Random and interval sets reuse it and do not ask. `WallRizz -w` downloads handlers from this fork (`unmellow/WallRizz`), not upstream. The Wayland handler is `awww@unmellow.js`: it runs `awww img` (swww's rename; https://codeberg.org/LGFae/awww) and falls back to `swww` only if `awww` is not on PATH. A file still named `swww@….js` in `~/.config/WallRizz/` is the old script; run `WallRizz -w` and pick `awww@unmellow.js` (that also replaces the older copy). swaybg is `swaybg@unmellow.js`.
 
 # Image previews in any terminal
 
