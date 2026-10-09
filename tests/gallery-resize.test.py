@@ -28,7 +28,7 @@ os.symlink(mock, f"{bindir}/ueberzugpp")
 log = f"{work}/uz.log"
 env = dict(os.environ, HOME=home, PATH=f"{bindir}:{os.environ['PATH']}", TERM="xterm-256color",
            WALLRIZZ_UEBERZUG_OUTPUT="x11", WALLRIZZ_UEBERZUG_SPACING_MS="2", MOCK_UZ_LOG=log)
-for k in ("DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM", "MOCK_UZ_DIE_AFTER"):
+for k in ("SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE", "DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM", "MOCK_UZ_DIE_AFTER"):
     env.pop(k, None)
 # -s 20x5 with the default padding (2 rows x 1 column) -> 21x7 cells per
 # tile: 120x40 -> 5x5, 80x24 -> 3x3, 100x30 -> 4x4, 140x45 -> 6x6

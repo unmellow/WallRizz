@@ -22,6 +22,17 @@
  * and by a watchdog timer, a failed write (EPIPE) counts too, and so does a
  * pid that no longer exists. On death the layer reports once through
  * `onDeath(reason)`; the caller decides whether to restart or fall back.
+ *
+ * Window-up confirmation (`confirm`, Wayland page mode): whenUp(id) resolves
+ * once the window of a sent add is on screen (see overlayWatch.js), so a
+ * replaced overlay is only removed after its successor appeared. Windows
+ * are matched to adds in order, which only works if every add gets its
+ * window: a remove that reaches ueberzugpp before the window is mapped
+ * means it never maps (no event), and every later add would be credited
+ * the previous one's window. So, with confirmation, an overlay whose window
+ * isn't up yet is not removed at once: it is "doomed", removed as soon as
+ * its window is up (or timed out), and no add is sent meanwhile (at most
+ * two overlays alive).
  */
 import { OS, STD } from "../core/constants.js";
 import { abortThumbnails } from "../wallpaper/thumbnails.js";
@@ -31,8 +42,17 @@ import {
   ueberzugSocketPath,
   ueberzugSpacing,
 } from "./imageProtocol.js";
+import { FALLBACK_MS, WindowWatch } from "./overlayWatch.js";
 
 const live = new Set();
+// Wayland: ueberzugpp 2.9.x commits a new window's surface on "add" but only
+// flushes its Wayland connection when an event comes in, on a 100 ms poll
+// timeout, or on "remove" (WaylandCanvas::remove_image). With the replaced
+// overlay kept up until the new one is mapped, nothing else flushes, and
+// the new window shows up to 100 ms late (sway: 110 ms instead of 35 ms for
+// a page). So every add is followed by the remove of an identifier that
+// never exists: a no-op that flushes.
+export const FLUSH_ID = "wallrizz-flush";
 let signalsInstalled = false;
 let onSignalCleanup = null;
 
@@ -84,6 +104,10 @@ export class UeberzugLayer {
    *   their own size, so ueberzugpp must not keep resized copies in
    *   ~/.cache/ueberzugpp (page composites would pile up there, outside our
    *   cache cap) and not decode that copy again on every add
+   * @param {boolean} [opts.confirm] - watch for the windows of adds
+   *   (WindowWatch: sway IPC, hyprctl, or a FALLBACK_MS estimate)
+   * @param {boolean} [opts.flushAdds] - follow every add with a no-op
+   *   remove (FLUSH_ID); default: Wayland output
    */
   constructor(output, {
     bin = "ueberzugpp",
@@ -92,6 +116,8 @@ export class UeberzugLayer {
     watchMs = 200,
     onDeath = null,
     noCache = false,
+    confirm = false,
+    flushAdds = output === "wayland",
   } = {}) {
     this.output = output;
     this.bin = bin;
@@ -112,6 +138,23 @@ export class UeberzugLayer {
     this.stopped = false;
     this.deathReason = null;
     this.sent = 0;
+    this.confirm = confirm;
+    this.flushAdds = flushAdds;
+    this.windows = null; // WindowWatch
+    this.upInfo = new Map(); // identifier -> { at, how }
+    this.upWaiters = new Map(); // identifier -> [resolve]
+    this.settled = false;
+    this.doomed = new Set(); // removal deferred until the window is up
+  }
+
+  /** removes of unconfirmed windows are deferred (see the header) */
+  defersRemoves() {
+    return Boolean(this.windows) && this.windows.kind !== "none";
+  }
+
+  /** how windows are confirmed: "sway", "hyprland" or "none" */
+  confirmKind() {
+    return this.windows?.kind ?? "none";
   }
 
   /**
@@ -121,7 +164,18 @@ export class UeberzugLayer {
    * @returns {Promise<boolean>} true if it is running
    */
   async start(graceMs = 250) {
+    if (!this.spawn()) return false;
+    return await this.settle(graceMs);
+  }
+
+  /**
+   * Spawn ueberzugpp without waiting (commands can be queued at once).
+   * @returns {boolean} false if it could not be spawned at all
+   */
+  spawn() {
     installUeberzugSignalHandlers();
+    // the watcher first: subscribed before ueberzugpp maps anything
+    if (this.confirm) this.windows = new WindowWatch(() => this.pid);
     const fds = OS.pipe();
     if (!fds) return false;
     const [readFd, writeFd] = fds;
@@ -147,16 +201,28 @@ export class UeberzugLayer {
     if (!this.pid || this.pid < 0) {
       this.pid = null;
       OS.close(writeFd);
+      this.windows?.stop();
+      this.windows = null;
       return false;
     }
     this.file = STD.fdopen(writeFd, "w");
     this.dead = false;
     live.add(this);
+    return true;
+  }
+
+  /**
+   * Give a spawned layer a moment to fail (no display, unsupported
+   * compositor, missing libs...), then start the watchdog.
+   * @returns {Promise<boolean>} true if it is running
+   */
+  async settle(graceMs = 250) {
     await OS.sleepAsync(graceMs);
     if (!this.alive()) {
-      this.stop();
+      if (!this.stopped) this.stop();
       return false;
     }
+    this.settled = true;
     this.watch();
     return true;
   }
@@ -198,6 +264,7 @@ export class UeberzugLayer {
     this.deathReason = reason;
     this.queue.length = 0;
     this.shown.clear();
+    this.dropWindows();
     if (this.timer) OS.clearTimeout(this.timer);
     if (this.watchTimer) OS.clearTimeout(this.watchTimer);
     this.timer = this.watchTimer = null;
@@ -245,6 +312,8 @@ export class UeberzugLayer {
     if (this.timer || this.dead) return;
     while (this.queue.length) {
       const head = this.queue[0];
+      // an add waits for deferred removals (pumped again when they're sent)
+      if (head.action === "add" && this.doomed.size) return;
       const now = Date.now();
       let due = this.lastSentAt + this.gapMs;
       if (head.action === "add") due = Math.max(due, this.lastAddAt + this.spacingMs);
@@ -256,10 +325,15 @@ export class UeberzugLayer {
         return;
       }
       this.queue.shift();
-      if (!this.write(head.line)) return;
+      if (!this.write(head.line)) {
+        this.settleWaiters(head.identifier, "dead");
+        return;
+      }
       if (head.action === "add") {
         this.lastAddAt = this.lastSentAt;
         this.shown.add(head.identifier);
+        this.expectWindow(head.identifier);
+        if (this.flushAdds && !this.write(ueberzugRemove(FLUSH_ID))) return;
       }
     }
   }
@@ -283,15 +357,95 @@ export class UeberzugLayer {
     const queued = this.queue.findIndex((c) =>
       c.action === "add" && c.identifier === identifier
     );
-    if (queued >= 0) this.queue.splice(queued, 1); // never sent: nothing to remove
+    if (queued >= 0) {
+      this.queue.splice(queued, 1); // never sent: nothing to remove
+      this.settleWaiters(identifier, "cancelled");
+    }
     if (!this.shown.delete(identifier)) return;
+    const info = this.upInfo.get(identifier);
+    if (info?.how === "timeout") this.windows?.removedUnseen(identifier);
+    if (!this.upInfo.delete(identifier)) {
+      // removed before its window was confirmed
+      this.settleWaiters(identifier, "removed");
+      if (this.defersRemoves()) {
+        this.doomed.add(identifier); // see expectWindow
+        return;
+      }
+      this.windows?.forget(identifier);
+    }
     this.queue.push({ action: "remove", identifier, line: ueberzugRemove(identifier) });
     this.pump();
   }
 
   /** Drop adds that were queued but not sent yet (stale page). */
   cancelPending() {
+    for (const c of this.queue) {
+      if (c.action === "add") this.settleWaiters(c.identifier, "cancelled");
+    }
     this.queue = this.queue.filter((c) => c.action !== "add");
+  }
+
+  /** an add was written: find out when its window is up */
+  expectWindow(identifier) {
+    const up = (how) => {
+      if (this.doomed.delete(identifier)) {
+        // removed meanwhile: now it can go (adds held back follow)
+        if (this.dead) return;
+        if (how === "timeout") this.windows?.removedUnseen(identifier);
+        this.queue.unshift({ action: "remove", identifier, line: ueberzugRemove(identifier) });
+        this.pump();
+        return;
+      }
+      if (!this.shown.has(identifier) || this.upInfo.has(identifier)) return;
+      const info = { at: Date.now(), how };
+      this.upInfo.set(identifier, info);
+      this.settleWaiters(identifier, how, info.at);
+    };
+    if (this.windows) this.windows.sent(identifier, up);
+    else OS.setTimeout(() => up("fallback"), FALLBACK_MS);
+  }
+
+  settleWaiters(identifier, how, at = Date.now()) {
+    const waiters = this.upWaiters.get(identifier);
+    if (!waiters) return;
+    this.upWaiters.delete(identifier);
+    for (const resolve of waiters) resolve({ how, at });
+  }
+
+  /** resolve every waiter (death / stop), stop the watcher */
+  dropWindows() {
+    for (const identifier of [...this.upWaiters.keys()]) this.settleWaiters(identifier, "dead");
+    this.upInfo.clear();
+    this.doomed.clear();
+    this.windows?.stop();
+    this.windows = null;
+  }
+
+  /**
+   * Resolves with { how, at } once the window of add `identifier` is up:
+   * how = "mapped" (confirmed), "timeout" (HARD_TIMEOUT_MS without a
+   * confirmation), "fallback" (no confirmation possible, assumed up after
+   * FALLBACK_MS); or, if it never will be: "cancelled"
+   * (dropped before it was sent), "removed", "dead", "gone" (unknown id).
+   * @returns {Promise<{how: string, at: number}>}
+   */
+  whenUp(identifier) {
+    const info = this.upInfo.get(identifier);
+    if (info) return Promise.resolve(info);
+    const queued = this.queue.some((c) => c.action === "add" && c.identifier === identifier);
+    if (this.dead || (!queued && !this.shown.has(identifier))) {
+      return Promise.resolve({ how: "gone", at: Date.now() });
+    }
+    return new Promise((resolve) => {
+      const list = this.upWaiters.get(identifier) ?? [];
+      list.push(resolve);
+      this.upWaiters.set(identifier, list);
+    });
+  }
+
+  /** @returns {boolean} the window of `identifier` is known to be up */
+  isUp(identifier) {
+    return this.upInfo.has(identifier);
   }
 
   /** Cancel queued adds and remove every overlay that was shown. */
@@ -326,7 +480,7 @@ export class UeberzugLayer {
         // exiting: pending removes and the removal of what is shown are
         // written right away (no new window is mapped, nothing to pace)
         for (const c of this.queue) this.file.puts(c.line + "\n");
-        for (const identifier of this.shown) {
+        for (const identifier of [...this.shown, ...this.doomed]) {
           this.file.puts(ueberzugRemove(identifier) + "\n");
         }
         this.file.flush();
@@ -336,6 +490,7 @@ export class UeberzugLayer {
     }
     this.queue.length = 0;
     this.shown.clear();
+    this.dropWindows();
     const pid = this.pid;
     this.pid = null;
     this.dead = true;

@@ -7,6 +7,15 @@
 #                        after the N-th command of this instance
 # MOCK_UZ_CLOSE_STDIN=1: close stdin and keep running (writes get EPIPE)
 # MOCK_UZ_DIE_SKIP=N:    the first N instances (counted in the log) don't die
+# MOCK_SWAY_EVENTS=FILE: emulate sway: every add's window is "mapped" (a sway
+#                        window event with this pid appended to FILE, and
+#                        "MAPPED <id> <epoch>" to the log) MOCK_UZ_MAP_MS
+#                        (default 100) after the previous window was, the
+#                        first one MOCK_UZ_FIRST_MAP_MS after its add (one
+#                        window at a time, in order, like ueberzugpp); an
+#                        add removed before its window is due never maps
+#                        (no event), as with the real ueberzugpp
+# MOCK_UZ_NO_MAP=1:      ... except that no window is ever reported
 log=${MOCK_UZ_LOG:-/tmp/mock-ueberzugpp.log}
 instance=$(grep -c '^ARGV' "$log" 2>/dev/null)
 echo "ARGV $*" >> "$log"
@@ -24,8 +33,30 @@ if [[ -n $MOCK_UZ_CLOSE_STDIN ]]; then
 fi
 trap 'echo "SIGTERM" >> "$log"; exit 0' TERM
 n=0
+mapped_at=0 # (microseconds) when the last window was mapped
+maps=0
+us() { local t=${EPOCHREALTIME/./}; echo $((10#$t)); }
+gone_dir=$log.gone.$$
+emit_map() { # id due_us con_id
+  local wait=$(( $2 - $(us) ))
+  (( wait > 0 )) && sleep "$(printf '%d.%06d' $((wait / 1000000)) $((wait % 1000000)))"
+  if [[ -e $gone_dir/$1 ]]; then echo "UNMAPPED $1 $EPOCHREALTIME" >> "$log"; return; fi
+  echo "{\"change\":\"new\",\"container\":{\"id\":$3,\"app_id\":\"ueberzugpp_mock$3\",\"pid\":$$,\"visible\":true}}" >> "$MOCK_SWAY_EVENTS"
+  echo "MAPPED $1 $EPOCHREALTIME" >> "$log"
+}
 while IFS= read -r line; do
   echo "CMD $line" >> "$log"
+  if [[ -n $MOCK_SWAY_EVENTS && -z $MOCK_UZ_NO_MAP &&
+        $line =~ \"action\":\"add\",\"identifier\":\"([^\"]+)\" ]]; then
+    now=$(us)
+    if (( maps == 0 )); then due=$(( now + ${MOCK_UZ_FIRST_MAP_MS:-${MOCK_UZ_MAP_MS:-100}} * 1000 ))
+    else due=$(( (now > mapped_at ? now : mapped_at) + ${MOCK_UZ_MAP_MS:-100} * 1000 )); fi
+    mapped_at=$due
+    maps=$((maps + 1))
+    emit_map "${BASH_REMATCH[1]}" "$due" "$$$maps" &
+  elif [[ -n $MOCK_SWAY_EVENTS && $line =~ \"action\":\"remove\",\"identifier\":\"([^\"]+)\" ]]; then
+    mkdir -p "$gone_dir" && : > "$gone_dir/${BASH_REMATCH[1]}"
+  fi
   if [[ -n $MOCK_UZ_TIMES ]]; then
     [[ $line =~ \"action\":\"([a-z]+)\",\"identifier\":\"([^\"]+)\" ]] &&
       echo "$EPOCHREALTIME ${BASH_REMATCH[1]} ${BASH_REMATCH[2]}" >> "$MOCK_UZ_TIMES"
@@ -37,4 +68,5 @@ while IFS= read -r line; do
     kill -ABRT $$
   fi
 done
+rm -rf "$gone_dir"
 echo "EOF" >> "$log"

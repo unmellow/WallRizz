@@ -196,7 +196,7 @@ export function parseArguments() {
         .env("WALLRIZZ_CACHE_MAX_MB")
         .val("MB")
         .desc(
-          "Size cap of the image caches (thumbnails, tiles, Überzug++ page composites). Checked in the background at startup; the oldest files go first. 0 = no cap. (default: 1024)",
+          "Size cap of the image caches (thumbnails, tiles, Überzug++ page composites). Checked in the background at startup; the oldest files go first. 0 = no cap.",
         ),
       [argNames.clearCache]: arg
         .flag(false)

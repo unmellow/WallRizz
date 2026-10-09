@@ -2,7 +2,7 @@
 """--clear-cache / --clear-thumbnails and the startup cache cleanup, end to
 end with the real binary:
 
-  1. --help lists both flags (no short flags)
+  1. --help lists both flags (no short flags), each default stated once
   2. --clear-thumbnails: removes pic/, tiles/, composites/, fullscreen
      files, keeps colours and themes, prints what was freed, exit 0, never
      opens the picker (no alternate screen)
@@ -54,6 +54,19 @@ import re
 check("--help lists --clear-cache, no short flag", re.search(r"^  --\(no-\)clear-cache ", out, re.M), out[-800:])
 check("--help lists --clear-thumbnails, no short flag", re.search(r"^  --\(no-\)clear-thumbnails ", out, re.M))
 check("--help lists --cache-max", "--cache-max" in out)
+# every option states its default at most once (--cache-max used to say
+# "(default: 1024)" twice: in its description and from the arg library)
+blocks, cur = [], None
+for line in out.split("\n"):
+    if re.match(r"^  -", line):
+        cur = [line]
+        blocks.append(cur)
+    elif cur is not None:
+        cur.append(line)
+twice = [b[0].split(":")[0].strip() for b in blocks if "\n".join(b).count("(default:") > 1]
+check("--help: no option states its default twice", not twice and blocks, str(twice))
+cm = next((b for b in blocks if "--cache-max" in b[0]), [])
+check("--help: --cache-max shows (default: 1024) exactly once", "\n".join(cm).count("(default: 1024)") == 1, "\n".join(cm))
 
 # 2. --clear-thumbnails (HOME cache)
 hc = f"{home}/.cache/WallRizz"
@@ -108,7 +121,7 @@ gone_key = "g-0000000c-1000-1-600x338.png"
 json.dump({gone_key: [1, 2]}, open(f"{xc}/colours.json", "w"))
 json.dump({"g-0000000c-1000-1-600x338": f"{work}/removed/g.jpg"}, open(f"{xc}/sources.json", "w"))
 env = dict(base_env, HOME=home, XDG_CACHE_HOME=xdg, TERM="xterm-256color")
-for k in ("DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM"):
+for k in ("SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE", "DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM"):
     env.pop(k, None)
 pid, fd = pty.fork()
 if pid == 0:

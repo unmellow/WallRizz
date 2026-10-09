@@ -35,7 +35,7 @@ import {
 } from "./imageProtocol.js";
 import { encodeJpegPayload, itermEscape, TileCache } from "./tileCache.js";
 import { pageComposite, ueberzugOverlayMode } from "./pageComposite.js";
-import { liveRenderDir, sweepDeadPartials } from "./liveDir.js";
+import { claimLiveDir, liveRenderDir, releaseLiveDir, sweepDeadPartials } from "./liveDir.js";
 import { ueberzugSpacing } from "./imageProtocol.js";
 import { defaultPoolSize, magickSlots, ThumbPool } from "../wallpaper/thumbnails.js";
 
@@ -63,13 +63,28 @@ const UEBERZUG_PAGE_SPACING_MS = 0;
 // a superseded partial composite is deleted this long after it was replaced
 // (ueberzugpp reads the file right after the add)
 const PARTIAL_KEEP_MS = 1000;
-// a page overlay that was updated (partial -> fuller composite) is removed
-// this long after its successor was added. ueberzugpp has no in-place
-// update: re-adding the same identifier closes the old window before the
-// new one is mapped (one blank frame on sway), so every update is a new
-// identifier on top of the old overlay. Mapping a full-page image takes
-// ueberzugpp ~110-140 ms on sway; 150 ms was already blink-free in tests.
-const UEBERZUG_SWAP_REMOVE_MS = 300;
+// Replacing a page overlay (page flip, partial -> fuller composite):
+// ueberzugpp has no in-place update (re-adding an identifier closes the old
+// window before the new one is mapped), so the new composite is a new
+// identifier on top, and the old overlay is removed only once the new
+// window is up: confirmed through sway IPC / hyprctl (overlayWatch.js),
+// else assumed after FALLBACK_MS (300 ms), at the latest HARD_TIMEOUT_MS
+// (1 s). A confirmed window is removed UEBERZUG_UP_GRACE_MS later: sway
+// reports the map before the next output frame shows it.
+const UEBERZUG_UP_GRACE_MS = 50;
+// overlay outcomes that mean the window will never be up
+const NEVER_UP = new Set(["cancelled", "removed", "dead", "gone"]);
+// 1x1 transparent PNG: added once at start (page mode) so ueberzugpp's
+// one-time setup (image loader, first window) overlaps the thumbnails
+// instead of delaying the first page. WALLRIZZ_UEBERZUG_WARMUP=0: off
+const WARMUP_PNG = [
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+  0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x00, 0x02, 0x00,
+  0x00, 0x05, 0x00, 0x01, 0x7a, 0x5e, 0xab, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+  0xae, 0x42, 0x60, 0x82,
+];
+const WARMUP_FILE_MS = 5000;
 const PID = OS.getpid?.() ?? 0;
 // a crashed ueberzugpp is restarted this often per session, then WallRizz
 // falls back to chafa symbols
@@ -120,6 +135,8 @@ export class GalleryView {
       poolSize: this.poolSize,
     });
 
+    // live partial composites of this run
+    this.liveFiles = new Set();
     if (this.protocol === "ueberzug") {
       this.ueberzugOutput = getImageProtocol(this.config).ueberzugOutput ?? "x11";
       const env = STD.getenviron();
@@ -133,18 +150,22 @@ export class GalleryView {
         this.updateMs = ueberzugSpacing(this.ueberzugOutput, env);
         this.liveDir = liveRenderDir(env, COMPOSITE_DIR);
         sweepDeadPartials(this.liveDir, PID);
+        if (this.liveDir !== COMPOSITE_DIR) claimLiveDir(this.liveDir, PID);
       }
-      if (!(await this.startUeberzug(spacing))) {
-        // ueberzugpp didn't start (no usable canvas, missing libs...)
+      // not awaited: ueberzugpp starts while the thumbnails are made; if it
+      // dies within its grace period, onUeberzugDeath switches to symbols
+      if (!this.spawnUeberzug(spacing)) {
+        // ueberzugpp couldn't be run at all
         requireChafa("symbols", "ueberzugpp failed to start");
         this.protocol = "symbols";
       }
     }
     // Ctrl+C / SIGTERM / SIGHUP: no overlay, magick child or temp file is
     // left behind, and the screen is restored
-    this.liveFiles = new Set();
     installUeberzugSignalHandlers(() => {
       for (const f of this.liveFiles) OS.remove(f);
+      this.dropWarmupFile();
+      this.releaseLiveDir();
       STD.out.puts(exitAlternativeScreen + clearTerminal + cursorShow);
       STD.out.flush();
     });
@@ -192,6 +213,11 @@ export class GalleryView {
     }).catch(print);
   }
 
+  /** the live dir goes with the last WallRizz that uses it */
+  releaseLiveDir() {
+    if (this.liveDir && this.liveDir !== COMPOSITE_DIR) releaseLiveDir(this.liveDir, PID);
+  }
+
   makeTileCache() {
     this.tiles = new TileCache({
       protocol: this.protocol,
@@ -206,22 +232,73 @@ export class GalleryView {
    * redraw, then fall back to chafa symbols for the rest of the session.
    * @returns {Promise<boolean>}
    */
-  async startUeberzug(spacingMs) {
+  newUeberzugLayer(spacingMs) {
+    const pageMode = this.overlayMode === "page";
     const layer = new UeberzugLayer(this.ueberzugOutput, {
       spacingMs,
-      noCache: this.overlayMode === "page",
+      noCache: pageMode,
+      // page mode replaces overlays: know when the new window is up
+      confirm: pageMode && this.ueberzugOutput === "wayland",
       onDeath: (reason) => this.onUeberzugDeath(layer, reason),
     });
+    return layer;
+  }
+
+  async startUeberzug(spacingMs) {
+    const layer = this.newUeberzugLayer(spacingMs);
     if (!(await layer.start())) return false;
     this.ueberzug = layer;
     return true;
+  }
+
+  /**
+   * First start: spawn and use the layer at once, check it in the
+   * background (a layer that dies within its grace period means Überzug++
+   * can't work here: symbols, no restarts).
+   * @returns {boolean} false if it couldn't be spawned
+   */
+  spawnUeberzug(spacingMs) {
+    const layer = this.newUeberzugLayer(spacingMs);
+    if (!commandExists(layer.bin) || !layer.spawn()) return false;
+    this.ueberzug = layer;
+    if (this.overlayMode === "page") this.warmUpUeberzug(layer);
+    layer.settle().then((ok) => {
+      if (!ok) this.onUeberzugDeath(layer, layer.deathReason ?? "exited right after starting");
+    });
+    return true;
+  }
+
+  /** see WARMUP_PNG */
+  warmUpUeberzug(layer) {
+    if (STD.getenv("WALLRIZZ_UEBERZUG_WARMUP") === "0" || !this.liveDir) return;
+    const path = `${this.liveDir}warmup-${PID}.png`;
+    const fd = OS.open(path, OS.O_WRONLY | OS.O_CREAT | OS.O_TRUNC, 0o600);
+    if (fd < 0) return;
+    const ok = OS.write(fd, new Uint8Array(WARMUP_PNG).buffer, 0, WARMUP_PNG.length) === WARMUP_PNG.length;
+    OS.close(fd);
+    if (!ok) return OS.remove(path);
+    // (not a live partial: page changes must not delete it before a slow
+    // ueberzugpp has read it; it goes after WARMUP_FILE_MS, or on exit)
+    this.warmupFile = path;
+    OS.setTimeout(() => this.dropWarmupFile(), WARMUP_FILE_MS);
+    const id = "wallrizz-warmup";
+    layer.add(id, 0, 0, 1, 1, path, "fit_contain");
+    // removed once its window is up (removing it earlier would be deferred
+    // by the layer anyway)
+    layer.whenUp(id).then(() => layer.remove(id));
+  }
+
+  dropWarmupFile() {
+    if (this.warmupFile) OS.remove(this.warmupFile);
+    this.warmupFile = null;
   }
 
   async onUeberzugDeath(layer, reason) {
     if (this.ueberzug !== layer) return; // stopped / replaced already
     this.ueberzug = null;
     this.ueberzugDeaths = [...(this.ueberzugDeaths ?? []), reason];
-    if (this.ueberzugRestarts < UEBERZUG_MAX_RESTARTS) {
+    // died while starting: Überzug++ doesn't work here, no restarts
+    if (layer.settled && this.ueberzugRestarts < UEBERZUG_MAX_RESTARTS) {
       this.ueberzugRestarts++;
       if (await this.startUeberzug(Math.max(layer.spacingMs * 2, 50))) {
         this.redraw?.();
@@ -748,7 +825,7 @@ export class GalleryView {
       }
     };
 
-    const drawPageComposite = (ueberzug, generation, thumbGen, current, afterFirstAdd = null) => {
+    const drawPageComposite = (ueberzug, generation, thumbGen, current, replaces = []) => {
       const page = currentPage;
       const startIdx = page * maxCellsInGrid;
       const count = tilesOnPage();
@@ -762,32 +839,60 @@ export class GalleryView {
       let failedKey = null;
       // the last partial composite made: the next one only adds new tiles
       let base = null; // { path, tiles: Set }
-      // while a page fills in, the overlay is updated with a new file each
-      // time (a new path: nothing can serve a stale image), at most once per
-      // updateMs, under a new identifier; the previous overlay goes
-      // UEBERZUG_SWAP_REMOVE_MS later (the new one covers all its tiles).
-      // A newer composite replaces one still waiting. A cached or complete
-      // page is a single add.
+      // Every add is a new file (nothing can serve a stale image) under a
+      // new identifier, on top of what it replaces: the old page's overlay
+      // (`replaces`, a page flip) for the first add, the previous update
+      // after that. The replaced overlay is removed once the new window is
+      // up (+ UEBERZUG_UP_GRACE_MS when confirmed), so at most two overlays
+      // are alive. While a page fills in, the next composite is sent only
+      // when the previous update's window is up, its predecessor removed,
+      // and updateMs passed since it APPEARED (ueberzugpp needs that long
+      // between two windows; a slow first map would otherwise get updates
+      // queued behind it). Only the newest composite waits (coalescing). A
+      // cached or complete page is a single add.
       const updateMs = this.updateMs ?? 0;
       let serial = 0;
-      let liveId = null;
-      let lastShowAt = -Infinity;
+      let liveId = null; // the newest add of this page
+      let liveUpAt = null; // when its window was up and what it replaced removed
       let shownPath = null;
-      let waiting = null; // { c, path, timer }
+      let waiting = null; // { c, path }: newest composite not sent yet
+      let waitTimer = null;
+      const retire = (ids) => {
+        for (const sid of ids) ueberzug.remove(sid);
+      };
+      const kick = () => {
+        if (!waiting || waitTimer || !current()) return;
+        if (liveId && liveUpAt === null) return; // kicked again once it is up
+        const wait = liveId ? liveUpAt + updateMs - Date.now() : 0;
+        if (wait > 0) {
+          waitTimer = OS.setTimeout(() => {
+            waitTimer = null;
+            kick();
+          }, wait);
+          return;
+        }
+        const next = waiting;
+        waiting = null;
+        addNow(next.c, next.path);
+      };
       const addNow = (c, path) => {
         // ueberzug cells are 0-based, cursorTo rows are 1-based
         const newId = `${id}-u${++serial}`;
         ueberzug.add(newId, c.region.x, c.region.y - 1, c.region.columns, c.region.rows, path, "fit_contain");
-        if (liveId) {
-          const old = liveId;
-          OS.setTimeout(() => ueberzug.remove(old), UEBERZUG_SWAP_REMOVE_MS);
-        }
+        const replaced = liveId ? [liveId] : replaces;
+        replaces = [];
         liveId = newId;
-        lastShowAt = Date.now();
-        if (afterFirstAdd) {
-          afterFirstAdd();
-          afterFirstAdd = null;
-        }
+        liveUpAt = null;
+        ueberzug.whenUp(newId).then((info) => {
+          if (NEVER_UP.has(info.how) || !current()) return; // a newer draw owns the overlays
+          OS.setTimeout(() => {
+            if (!current()) return;
+            retire(replaced);
+            if (liveId !== newId) return;
+            liveUpAt = info.at;
+            kick();
+          }, info.how === "mapped" ? UEBERZUG_UP_GRACE_MS : 0);
+        });
         if (c.partial) retirePartial(shownPath);
         shownPath = path;
         shownKey = c.key;
@@ -802,18 +907,9 @@ export class GalleryView {
         }
       };
       const show = (c, path) => {
-        if (waiting) {
-          OS.clearTimeout(waiting.timer);
-          if (waiting.c.partial) retirePartial(waiting.path);
-          waiting = null;
-        }
-        const wait = lastShowAt + updateMs - Date.now();
-        if (wait <= 0) return addNow(c, path);
-        const timer = OS.setTimeout(() => {
-          waiting = null;
-          if (current()) addNow(c, path);
-        }, wait);
-        waiting = { c, path, timer };
+        if (waiting?.c.partial) retirePartial(waiting.path); // superseded unsent
+        waiting = { c, path };
+        kick();
       };
       // one composite in flight at a time; thumbnails that land meanwhile
       // go into the next one
@@ -829,7 +925,8 @@ export class GalleryView {
           return;
         }
         const c = compositeFor(count, ready, full);
-        if ((c.key === shownKey && (shownFull || !full)) || c.key === failedKey) {
+        if ((c.key === shownKey && (shownFull || !full)) || c.key === failedKey ||
+          c.key === waiting?.c.key) {
           if (c.partial) partialFiles.delete(c.dest);
           return;
         }
@@ -853,13 +950,13 @@ export class GalleryView {
           } else {
             failedKey = c.key;
             base = null;
-            if (afterFirstAdd) {
+            if (!liveId && replaces.length) {
               // the old page's overlay must not outlive a failed composite
-              afterFirstAdd();
-              afterFirstAdd = null;
+              retire(replaces);
+              replaces = [];
             }
           }
-          if (!c.partial) return; // shown now or after updateMs
+          if (!c.partial) return; // shown now or once the previous update is up
           if (dirty || resolved === count) update();
         }).catch(() => {
           running = false;
@@ -929,9 +1026,10 @@ export class GalleryView {
 
     // page mode, page key: the overlay of the page being left stays up
     // during the debounce, and if the new page's composite is cached, it is
-    // removed only after the new page's add (ueberzugpp runs commands one
-    // by one and tearing down a full-page window takes it ~100 ms, so a
-    // remove sent first delays the add by that much). A second page key
+    // removed only once the new page's window is up (drawPageComposite), so
+    // the flip never shows a blank terminal. Of the overlays alive, only the
+    // newest one whose window is up is kept (an update still on its way is
+    // dropped), so the new page's add makes at most two. A second page key
     // within the debounce (fast paging), or a page that is not cached,
     // removes it at once, so skipped pages are never drawn
     let staleOverlays = null; // identifiers of the page being left
@@ -950,9 +1048,13 @@ export class GalleryView {
       const ueberzug = this.ueberzug;
       const deferRemove = pageKey && this.overlayMode === "page" && !staleOverlays &&
         !overlayTimer && ueberzug.shown.size > 0;
-      if (deferRemove) {
+      const keep = deferRemove
+        ? [...ueberzug.shown].reverse().find((sid) => ueberzug.isUp(sid))
+        : null;
+      if (keep) {
         ueberzug.cancelPending();
-        staleOverlays = [...ueberzug.shown];
+        for (const sid of [...ueberzug.shown]) if (sid !== keep) ueberzug.remove(sid);
+        staleOverlays = [keep];
       } else {
         ueberzug.removeAll();
         staleOverlays = null;
@@ -979,13 +1081,13 @@ export class GalleryView {
         overlayTimer = null;
         if (!current()) return;
         if (this.overlayMode === "page") {
-          const stale = staleOverlays;
+          let stale = staleOverlays ?? [];
           staleOverlays = null;
-          const removeStale = () => {
-            for (const sid of stale ?? []) ueberzug.remove(sid);
-          };
-          if (stale && !cachedPageComposite()) removeStale();
-          drawPageComposite(ueberzug, generation, thumbGen, current, stale ? removeStale : null);
+          if (stale.length && !cachedPageComposite()) {
+            for (const sid of stale) ueberzug.remove(sid);
+            stale = [];
+          }
+          drawPageComposite(ueberzug, generation, thumbGen, current, stale);
         }
         // the debounce already gave ueberzugpp time to drop the old overlays
         else drawTileOverlays(ueberzug, generation, thumbGen, current, pageKey ? 0 : UEBERZUG_SETTLE_MS);
@@ -1464,6 +1566,8 @@ export class GalleryView {
       await this.thumbs?.shutdown();
       // ueberzugpp is gone: this run's partial composites can go too
       for (const f of partialFiles) OS.remove(f);
+      this.dropWarmupFile();
+      this.releaseLiveDir();
       STD.out.puts(clearTerminal);
       print(cursorShow);
     }

@@ -53,7 +53,7 @@ env = dict(os.environ, HOME=home, XDG_CACHE_HOME=xdg_cache, XDG_RUNTIME_DIR=run_
            MOCK_UZ_LOG=log, MOCK_UZ_PIDS=pids, CHAFA_ARGV_LOG=f"{work}/chafa.argv",
            MOCK_MAGICK_DELAY="0.25", MOCK_MAGICK_TEMPLATE_DIR=tpl,
            MOCK_MAGICK_TEMPLATE=f"{tpl}/default.png", MOCK_MAGICK_REAL=shutil.which("magick") or "/usr/bin/magick")
-for k in ("DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM", "MOCK_CHAFA_OLD",
+for k in ("SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE", "DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM", "MOCK_CHAFA_OLD",
           "WALLRIZZ_UEBERZUG_OVERLAY", "WALLRIZZ_UEBERZUG_DEBOUNCE_MS", "WALLRIZZ_CACHE_MAX_MB"):
     env.pop(k, None)
 cache = f"{xdg_cache}/WallRizz"

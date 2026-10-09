@@ -11,12 +11,16 @@
  * by us with no group/other access (created 0700 if missing; /dev/shm is
  * shared, so a directory someone else made is refused) and a probe file can
  * be written into it.
+ *
+ * Every running WallRizz that uses the directory keeps a `.inst-<pid>`
+ * marker in it; on exit the last one removes the (then empty) directory.
  */
 import * as OS from "os";
 import * as STD from "std";
 import { pidAlive } from "../wallpaper/cacheCleanup.js";
 
-const PARTIAL_RE = /^partial-(\d+)-\d+\.png$/;
+// files of one run: partial composites, the warm-up image, the marker
+const RUN_FILE_RE = /^(?:partial-(\d+)-\d+\.png|warmup-(\d+)\.png|\.inst-(\d+))$/;
 
 /** our uid (owner of /proc/self), or null where there is no /proc */
 export function currentUid() {
@@ -72,9 +76,9 @@ export function liveRenderDir(env, fallback, { shm = "/dev/shm", uid = currentUi
 }
 
 /**
- * Remove partial composites left by WallRizz runs that are gone (crash,
- * SIGKILL): partial-<pid>-<n>.png whose pid is not alive. Only that file
- * pattern, only directly inside `dir`.
+ * Remove files left by WallRizz runs that are gone (crash, SIGKILL):
+ * partial-<pid>-<n>.png, warmup-<pid>.png and .inst-<pid> whose pid is not
+ * alive. Only those file patterns, only directly inside `dir`.
  * @param {string} dir
  * @param {number} ownPid
  * @returns {number} files removed
@@ -84,12 +88,33 @@ export function sweepDeadPartials(dir, ownPid) {
   if (err !== 0) return 0;
   let removed = 0;
   for (const name of names) {
-    const m = PARTIAL_RE.exec(name);
+    const m = RUN_FILE_RE.exec(name);
     if (!m) continue;
-    const pid = Number(m[1]);
+    const pid = Number(m[1] ?? m[2] ?? m[3]);
     if (pid === ownPid || pidAlive(pid)) continue;
     const [st, serr] = OS.lstat(dir + name);
     if (serr === 0 && (st.mode & OS.S_IFMT) === OS.S_IFREG && OS.remove(dir + name) === 0) removed++;
   }
   return removed;
+}
+
+/** Mark `dir` as used by this run (see releaseLiveDir). */
+export function claimLiveDir(dir, pid) {
+  const f = STD.open(`${dir}.inst-${pid}`, "w");
+  if (f) f.close();
+}
+
+/**
+ * This run is done with `dir`: drop its marker and, if no other running
+ * WallRizz has one there, the directory itself (only if it is empty:
+ * rmdir never deletes anything else).
+ * @returns {boolean} whether the directory was removed
+ */
+export function releaseLiveDir(dir, pid) {
+  OS.remove(`${dir}.inst-${pid}`);
+  sweepDeadPartials(dir, pid);
+  const [names, err] = OS.readdir(dir);
+  if (err !== 0) return false;
+  if (names.some((n) => n.startsWith(".inst-"))) return false;
+  return OS.remove(dir.replace(/\/+$/, "")) === 0;
 }

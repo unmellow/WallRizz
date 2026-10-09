@@ -2,7 +2,7 @@
 // Drives the real UeberzugLayer against a mock ueberzugpp that records stdin.
 import * as std from "std";
 import * as os from "os";
-import { UeberzugLayer } from "../src/ui/ueberzug.js";
+import { FLUSH_ID, UeberzugLayer } from "../src/ui/ueberzug.js";
 
 const [, mock, log] = scriptArgs;
 const times = log + ".times";
@@ -12,11 +12,13 @@ const eq = (name, got, want) => {
   else { failed++; print(`FAIL ${name}: got ${JSON.stringify(got)} want ${JSON.stringify(want)}`); }
 };
 const readLog = () => (std.loadFile(log) ?? "").split("\n").filter(Boolean);
-const readTimes = () =>
+const readAllTimes = () =>
   (std.loadFile(times) ?? "").split("\n").filter(Boolean).map((l) => {
     const [t, action, id] = l.split(" ");
     return { t: Number(t) * 1000, action, id };
   });
+// (without the no-op removes that follow every Wayland add, see FLUSH_ID)
+const readTimes = () => readAllTimes().filter((x) => x.id !== FLUSH_ID);
 const gone = (pid) => os.kill(pid, 0) !== 0; // reaped -> ESRCH
 // Condition-based waits (no fixed sleeps), generous deadline, scaled by
 // WALLRIZZ_TEST_TIMEOUT_SCALE for slow or busy machines.
@@ -130,6 +132,11 @@ eq(
   "cancel: only the first old add was sent, then its remove, then the new page",
   ts.map((x) => `${x.action} ${x.id}`),
   ["add p1-g2-0", "remove p1-g2-0", "add p2-g3-0", "add p2-g3-1", "add p2-g3-2"],
+);
+eq(
+  "wayland: each add is followed by the no-op remove that makes ueberzugpp flush",
+  readAllTimes().slice(0, 3).map((x) => `${x.action} ${x.id}`),
+  ["add p1-g2-0", `remove ${FLUSH_ID}`, "remove p1-g2-0"],
 );
 eq("cancel: shown = new page", [...layer.shown].sort(), ["p2-g3-0", "p2-g3-1", "p2-g3-2"]);
 layer.stop();

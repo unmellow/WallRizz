@@ -40,7 +40,7 @@ env = dict(os.environ, HOME=home, PATH=f"{bindir}:{os.environ['PATH']}", TERM="x
            WALLRIZZ_UEBERZUG_SPACING_MS=str(SPACING),
            MOCK_UZ_LOG=log, MOCK_UZ_TIMES=times, MOCK_UZ_PIDS=pids,
            MOCK_UZ_DIE_AFTER="4", MOCK_UZ_DIE_SKIP="1", CHAFA_ARGV_LOG=chafa_log)
-for k in ("DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM", "MOCK_CHAFA_OLD"):
+for k in ("SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE", "DISPLAY", "WAYLAND_DISPLAY", "TMUX", "KITTY_WINDOW_ID", "TERM_PROGRAM", "MOCK_CHAFA_OLD"):
     env.pop(k, None)
 
 t = Checks("gallery ueberzug")

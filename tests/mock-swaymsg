@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Mock swaymsg for tests: `swaymsg -r -t subscribe -m '["window"]'` streams
+# the window events that tests/mock-ueberzugpp appends to $MOCK_SWAY_EVENTS
+# (from now on, like a real subscription). Anything else: exit 1.
+# MOCK_SWAY_ARGV=FILE: append argv (one line per call)
+[[ -n $MOCK_SWAY_ARGV ]] && echo "$*" >> "$MOCK_SWAY_ARGV"
+[[ " $* " == *" subscribe "* && -n $MOCK_SWAY_EVENTS ]] || exit 1
+touch "$MOCK_SWAY_EVENTS"
+off=$(( $(stat -c %s "$MOCK_SWAY_EVENTS") + 1 ))
+# --pid: gone with its parent (WallRizz) even if that is SIGKILLed
+# -s: inotify is not available everywhere (overlayfs): poll every 10 ms
+exec tail -s 0.01 -c "+$off" -F --pid="$PPID" "$MOCK_SWAY_EVENTS" 2>/dev/null

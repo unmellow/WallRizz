@@ -39,6 +39,8 @@ test: quickjs/qjs src/WallRizz
 	magick -size 320x180 plasma:fractal -depth 8 /tmp/wallrizz-tile-home/thumb.png
 	HOME=/tmp/wallrizz-tile-home quickjs/qjs --std --module tests/tileCache.test.js /tmp/wallrizz-tile-home/thumb.png
 	quickjs/qjs --std --module tests/ueberzug.test.js tests/mock-ueberzugpp /tmp/wallrizz-ueberzug-test.log
+	rm -rf /tmp/wallrizz-overlaywatch-test
+	quickjs/qjs --std --module tests/overlayWatch.test.js $(abspath tests) /tmp/wallrizz-overlaywatch-test
 	python3 tests/gallery-resize.test.py src/WallRizz tests/mock-ueberzugpp /tmp/wallrizz-resize-test
 	cd src && ../quickjs/qjs --std --module ../tests/thumbnails.test.js $(abspath tests/mock-magick-slow) /tmp/wallrizz-thumbnails-test
 	quickjs/qjs --std --module tests/cache.test.js /tmp/wallrizz-cache-test
@@ -47,8 +49,9 @@ test: quickjs/qjs src/WallRizz
 		python3 tests/gallery-ueberzug.test.py src/WallRizz tests/mock-ueberzugpp /tmp/wallrizz-gallery-test && \
 		python3 tests/gallery-thumbs.test.py src/WallRizz tests/mock-magick-slow /tmp/wallrizz-thumbs-test && \
 		python3 tests/gallery-pages.test.py src/WallRizz tests/mock-ueberzugpp tests/mock-magick-slow /tmp/wallrizz-pages-test && \
+		python3 tests/gallery-confirm.test.py src/WallRizz $(abspath tests) tests/mock-magick-slow /tmp/wallrizz-confirm-test && \
 		python3 tests/cache-flags.test.py src/WallRizz /tmp/wallrizz-cacheflags-test; \
-	else echo "probe / gallery-ueberzug / gallery-thumbs / gallery-pages / cache-flags tests skipped: chafa not installed"; fi
+	else echo "probe / gallery-ueberzug / gallery-thumbs / gallery-pages / gallery-confirm / cache-flags tests skipped: chafa not installed"; fi
 
 install: src/WallRizz
 	install -Dm755 src/WallRizz "$(DESTDIR)$(BINDIR)/WallRizz"
